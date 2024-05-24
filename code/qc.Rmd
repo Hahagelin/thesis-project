@@ -1,0 +1,333 @@
+
+## Data loading
+
+```{r}
+# Loading necessary packages
+library(tidyverse)
+library(viridis)
+library(FactoMineR)
+library(factoextra)
+library(OlinkAnalyze)
+library(pheatmap)
+library(umap)
+library(ggsci)
+```
+
+```{r}
+# Load data
+npx_na <- read.csv("expression_data.csv") # Expression data
+sinfo_na <- read.csv("clinical_data.csv") # Clinical data
+binfo <- read.csv("protein_information.csv") # Binder info
+```
+ 
+```{r}
+# Creating factors
+sinfo_na$primary_blood_draw <- as_factor(sinfo_na$primary_blood_draw)
+sinfo_na$x_BC <- as_factor(sinfo_na$x_BC)
+sinfo_na$menopause_status <- as_factor(sinfo_na$menopause_status)
+sinfo_na$mht_status <- as_factor(sinfo_na$mht_status)
+sinfo_na$smoking_status <- as_factor(sinfo_na$smoking_status)
+```
+
+## Calculating time between sample and diagnosis
+```{r}
+sinfo_dates <- sinfo_na |> 
+  filter(!is.na(bc_invasive_1stdiagdate)) 
+  
+sinfo_dates$blood_draw_date <- as.Date(sinfo_dates$blood_draw_date)
+sinfo_dates$bc_invasive_1stdiagdate <- as.Date(sinfo_dates$bc_invasive_1stdiagdate)
+
+sinfo_dates_cancer <- sinfo_dates |> 
+  mutate(time_diagnosis = bc_invasive_1stdiagdate - blood_draw_date) |> 
+  select(sample_id, blood_draw_date, bc_invasive_1stdiagdate, time_diagnosis) |> 
+  mutate(cancer_stage = case_when(
+    time_diagnosis < 365 ~ 1,
+    TRUE ~ 2
+  ))
+
+sinfo_dates_cancer$cancer_stage <- as_factor(sinfo_dates_cancer$cancer_stage)
+
+sinfo_dates_cancer <- sinfo_dates_cancer |> 
+  select(-blood_draw_date, -bc_invasive_1stdiagdate)
+
+ggplot(sinfo_dates_cancer, aes(x = time_diagnosis)) +
+  geom_density() +
+  geom_vline(xintercept = 365, linetype = "dashed") +
+  xlim(0, max(sinfo_dates_cancer$time_diagnosis))
+```
+
+```{r}
+# Removing rows containing missing values from NPX
+npx <- na.omit(npx_na)
+
+sinfo <- sinfo_na |> 
+  left_join(sinfo_dates_cancer, by = "sample_id") |> 
+  filter(!is.na(bmi)) |> 
+  mutate(cancer_stage = fct_na_value_to_level(cancer_stage, level = "0"))
+```
+
+## Identifying outliers - Olink QC plot
+
+The Olink scatterplot, which plots the IQR vs. median for all samples, is used to identify outliers. Outliers are here defined by being more than 5 standard deviations from mean IQR and median, and are removed from further analysis.
+```{r}
+# Retrieve necessary info for creating plot from binfo
+olink_ids <- data.frame(Protein = binfo$column_name, OlinkID = binfo$olink_id) # OlinkID
+panel_ids <- data.frame(Protein = binfo$column_name, Panel = binfo$panel)      # Type of panel
+
+# Before making any plots involving ggplot, it is necessary to convert the data into long format, because ggplot likes it so
+# Converting NPX data into long format
+npx_long <- pivot_longer(npx, cols = -sample_id, names_to = "Protein", values_to = "NPX") 
+
+# Combining NPX, olink_ids, panel_ids, and sample_ids into a single data frame for plotting: 
+long_olink_npx <- left_join(npx_long, olink_ids, by = "Protein") |> 
+  left_join(panel_ids, by = "Protein") |> 
+  rename(SampleID = sample_id) |>
+  mutate(SampleID = as.character(SampleID))
+
+# Plots the scatterplot using olink_qc_plot() from OlinkAnalyze package
+olink_qc_plot <- long_olink_npx |> 
+  olink_qc_plot(color_g = "Panel", IQR_outlierDef = 5, median_outlierDef = 5) # Here outlier definition can be controlled
+
+
+olink_qc_plot + scale_color_npg() + theme(legend.position = "right") + ggtitle("IQR vs. Median", subtitle = "Both regions") +theme(plot.title = element_text(colour="black"),
+          axis.title.x = element_text(colour="black"),
+          axis.title.y = element_text(colour="black"),
+          axis.text.x = element_text(colour="black"),
+          axis.text.y = element_text(colour="black"))
+
+ggsave("Olink_qc_plot.png", plot = last_plot(), path = "plots/", width = 8, height = 5 )
+```
+
+With the plot made, we can check it and look for outliers. The outliers are stored within the plot variable "olink_qc_plot" we created. Now, we need to remove the outlier samples from the data set.
+```{r}
+# Retrieving outliers
+outliers <- olink_qc_plot$data |> filter(Outlier == 1) |> select(SampleID, Panel, IQR, sample_median, Outlier) |> 
+  as_tibble()
+
+# Removing outlier-samples from the NPX data frame, and then from the clinical data
+npx <- npx |> 
+  filter(!(sample_id %in% outliers$SampleID))
+clinical_data <- sinfo |> 
+  filter(sample_id %in% npx$sample_id)
+
+```
+
+## Recalculating LOD frequency
+
+In the binder info data, limit of detection (LOD) frequency has already been calculated for each protein. However, we will recalculate these (...) Each protein has its own LOD, one per region, which can also be found in the "binfo". If a protein has measurements below its LOD in \>50% of the samples, then it will be removed.
+
+Firstly, we separate the data into region-specific data sets.
+```{r}
+# Both regions
+npx <- npx |> 
+  filter(sample_id %in% clinical_data$sample_id)
+
+# Skane data
+clinical_skane <- clinical_data |> 
+  filter(region == "skane")
+npx_skane <- npx |> 
+  filter(sample_id %in% clinical_skane$sample_id)
+
+#Stockholm data
+clinical_sthlm <- clinical_data |> 
+  filter(region == "stockholm")
+npx_sthlm <- npx |> 
+  filter(sample_id %in% clinical_sthlm$sample_id)
+```
+
+```{r}
+# Creating sample age variable
+baseline_skane <- as.Date("")
+clinical_skane$sample_age <- as.Date(clinical_skane$blood_draw_date) - baseline_skane
+
+baseline_sthlm <- as.Date("")
+clinical_sthlm$sample_age <- as.Date(clinical_sthlm$blood_draw_date) - baseline_sthlm
+
+```
+
+
+Now, we retrieve the region-specific LOD values for each protein and store them separately. Also, in order to have data frames only containing LOD values, we store the protein name column as the row names.
+```{r}
+# Loading the region specific LOD values for each protein
+LOD_skane <- binfo |> 
+  select(LOD_skane) 
+rownames(LOD_skane) <- binfo$column_name # Adds the protein names as row names in the LOD data frames
+
+LOD_sthlm <- binfo |> 
+  select(LOD_stockholm)
+rownames(LOD_sthlm) <- binfo$column_name
+```
+
+In order to keep it concise, we create a function that, for each protein, counts the number of samples below LOD. It takes a NPX and a LOD data frame as input and outputs the number of samples measured below LOD, for each protein.
+```{r}
+# Create function that counts samples below LOD for each protein
+count_below <- function(npx, LOD) {
+  
+  counts <- tibble() # Initialize an empty tibble to store counts
+  
+  # Iterate over the columns of npx to calculate counts
+  for (i in 1:ncol(npx)) {
+    current_LOD <- LOD[i, ] # Retrieves the current LOD value to use
+    counts[i, 1] <- sum(npx[, i] < current_LOD) # Checks if current row is below LOD
+  }
+  
+  # Tidying up the output data frame
+  counts <- counts |>  
+    mutate(Protein = rownames(LOD)) |> 
+    rename(Count = ...1) |> 
+    select(Protein, Count)
+  
+  return(counts)
+}
+```
+
+With the function created, we can call it for Skane and Stockholm respectively.
+
+```{r}
+# Call functions for both sets of NPX and LOD data
+counts_skane <- count_below(npx_skane |> select(-sample_id), LOD_skane) # Note that the "sample_id" column is excluded
+counts_sthlm <- count_below(npx_sthlm |> select(-sample_id), LOD_sthlm)
+```
+
+To calculate the frequency (%) we take the number of samples below LOD divided by the total number of samples.
+
+```{r}
+# Now calculate the frequency:
+freq_LOD_skane <- counts_skane |> 
+  mutate(LOD_frequency = counts_skane$Count / nrow(npx_skane)) |> 
+  mutate(Region = "Skane") # Adds region variable to identify in combined format
+
+freq_LOD_sthlm <- counts_sthlm |> 
+  mutate(LOD_frequency = counts_sthlm$Count / nrow(npx_sthlm)) |> 
+  mutate(Region = "Stockholm")
+
+# For easier plotting, we combine the data frames
+freq_LOD <- bind_rows(freq_LOD_skane, freq_LOD_sthlm)
+```
+
+To get an overview of each proteins' LOD frequency, they are plotted in a histogram.
+
+```{r}
+# Distribution of LOD frequency, in a histogram:
+
+LOD_plot <- ggplot(freq_LOD, aes(x = LOD_frequency, fill = Region)) +
+  geom_histogram(position = "identity", alpha = 0.9, binwidth = 0.03) + 
+  geom_vline(xintercept = 0.5, colour= "black" , linetype = "dashed", alpha = 0.8) +
+  facet_wrap(~ Region, scales = "fixed") + 
+  theme_minimal() +
+  scale_fill_lancet()+
+  labs(
+    title = "Limit of detection frequency per protein",
+    x = "Frequency below LOD",
+    y = "Count"
+  ) +
+  theme(legend.position = "none")
+  
+print(LOD_plot)
+ggsave("LOD_plot.png", plot = last_plot(), path = "plots/", width = 8, height = 5 )
+```
+
+Now that we know which proteins have \>50% LOD freq. we can remove them from their respective data set.
+
+```{r}
+below_50_skane <- freq_LOD_skane |> 
+  filter(LOD_frequency <= 0.5)
+below_50_sthlm <- freq_LOD_sthlm |> 
+  filter(LOD_frequency <= 0.5)
+
+# How many proteins are in common?
+common_proteins <- intersect(below_50_skane$Protein, below_50_sthlm$Protein) # 156 proteins in common that have below 50% LOD frequency
+
+# Updates the two NPX data frames
+npx_skane <- npx_skane |> 
+  select(sample_id, all_of(below_50_skane$Protein))
+
+npx_sthlm <- npx_sthlm |> 
+  select(sample_id, all_of(below_50_sthlm$Protein))
+
+```
+
+## Saving output data
+
+In order to use the cleaned data in other markdowns, we save it in the data folder.
+
+```{r}
+# Skane
+write_csv(npx_skane, file.path("../clean_data/npx_skane_filtered.csv"))
+write_csv(clinical_skane, file.path("../clean_data/clinical_skane_filtered.csv"))
+
+# Stockholm
+write_csv(npx_sthlm, file.path("../clean_data/npx_sthlm_filtered.csv"))
+write_csv(clinical_sthlm, file.path("../clean_data/clinical_sthlm_filtered.csv"))
+```
+
+```{r}
+names <- binfo$protein_name |> 
+  as_tibble()
+write_csv(names, file.path("list_of_proteins.csv"))
+```
+
+# Recreating regional difference plots
+
+```{r}
+# UMAP
+
+# Run the UMAP
+umap_results <- npx |> 
+  select(-sample_id) |> 
+  umap()
+
+umap <- npx |> 
+  left_join(clinical_data, by = "sample_id")
+
+# Add the UMAP variables to the NPX data frames
+umap$UMAP1 <- umap_results$layout[, 1]
+umap$UMAP2 <- umap_results$layout[, 2]
+
+```
+
+```{r}
+ggplot(umap, aes(x = UMAP1, y = UMAP2, color = region)) +
+  geom_point(alpha = 0.8) + 
+  theme_minimal() +
+  labs(title = "UMAP Projection - Both regions", x = "UMAP 1", y = "UMAP 2")
+```
+
+```{r}
+# PCA
+
+# Prepping for PCA using recipes
+prep <- recipe(~ ., data = npx) |>
+  update_role(sample_id, new_role = "ID") |> # Ensures that sample_id isn't used in any calculations
+  step_center(all_predictors()) |>  
+  step_scale(all_predictors()) |> 
+  step_pca(all_predictors(), num_comp = 2) |>  
+  prep() |> 
+  juice() |> 
+  left_join(clinical_data, by = "sample_id") |> 
+  select(-sample_id)
+
+ggplot(prep, aes(x = .panel_x, y = .panel_y, color = region, fill = region)) + 
+  geom_point(alpha = 0.3, shape = 16, size = 1) + 
+  geom_autodensity(alpha = 0.3) +
+  facet_matrix(vars(PC1, PC2), layer.diag = 2, grid.y.diag = FALSE) +
+  scale_color_npg() + 
+  scale_fill_npg()
+```
+```{r}
+prepped <- prep |> 
+  rename(Region = region) |> 
+  mutate(Region = case_when(
+    Region == "skane" ~ "Skåne",
+    Region == "stockholm" ~ "Stockholm",
+    TRUE ~ Region
+  ))
+
+ggplot(prepped, aes(x = PC1, y = PC2, color = Region, fill = Region)) +
+  geom_point(alpha = 0.45, shape = 16, size = 1.8) +
+  scale_color_npg() +
+  scale_fill_npg() +
+  theme_minimal()
+```
+
+

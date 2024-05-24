@@ -1,0 +1,898 @@
+# Effects of AbsPQN analysis
+
+Loading packages and data.
+
+```{r}
+# Packages
+library(tidyverse)
+library(viridis)
+library(pheatmap)
+library(umap)
+library(corrplot)
+library(patchwork)
+
+# Clinical data
+clinical_skane <- read_csv("../clean_data/clinical_skane_filtered.csv", show_col_types = FALSE)
+clinical_sthlm <- read_csv("../clean_data/clinical_sthlm_filtered.csv", show_col_types = FALSE)
+```
+
+Here, a function is created which will load the specified NPX data frame and also clean/sort it.
+
+```{r}
+# Function for cleaning and sorting the input data frames
+cleaner <- function(path, clinical_df) {
+  
+  clean_df <- read_csv(path, show_col_types = FALSE) |> # Loads the data
+    left_join(clinical_df |> select(sample_id, individual_id), by = "sample_id") |> # Attaches sample- and individual id to NPX data
+    select(sample_id, individual_id, everything()) |> # Reorders columns to put sample- and individual id at front
+    arrange(individual_id) # Sorts the rows by their individual id
+  
+  return(clean_df)
+}
+```
+
+Calling the cleaner function..
+
+```{r}
+## Pre AbsPQN
+pre_skane <- cleaner("../clean_data/npx_skane_filtered.csv", clinical_skane)
+pre_sthlm <- cleaner("../clean_data/npx_sthlm_filtered.csv", clinical_sthlm)
+
+## Post AbsPQN
+
+# AbsPQN1
+post_skane_v1 <- cleaner("../clean_data/norm_npx_skane_v1.csv", clinical_skane)
+post_sthlm_v1 <- cleaner("../clean_data/norm_npx_sthlm_v1.csv", clinical_sthlm)
+
+# AbsPQN2
+post_skane_v2 <- cleaner("../clean_data/norm_npx_skane_v2.csv", clinical_skane)
+post_sthlm_v2 <- cleaner("../clean_data/norm_npx_sthlm_v2.csv", clinical_sthlm)
+```
+
+# Correlations
+
+This section will examine the effect of what format the data has when AbsPQN is applied (log2 or not).
+
+## Protein-protein correlations
+
+Here, protein-protein correlations are calculated and then compared before and after AbsPQN.
+
+```{r}
+# Protein-protein correlations function
+protein_corr <- function(df, df_name) {
+ 
+  # Creates correlation matrix
+   corr_df <- df |> 
+    select(-sample_id, -individual_id) |> 
+    cor(method = "spearman", use = "complete.obs") 
+  
+  # Removes diagonal
+  diag(corr_df) <- NA
+  
+  # Long format
+  long_corr_df <- corr_df |> 
+    as_tibble(corr_df, rownames = "Protein1") |> 
+    pivot_longer(-Protein1, names_to = "Protein2", values_to = "Correlation") |> 
+    mutate(Matrix = df_name)
+  
+  return(long_corr_df)
+}
+```
+
+Calling correlation function..
+```{r}
+## Pre AbsPQN
+pre_skane_corr <- protein_corr(pre_skane, "pre_skane_NA")
+pre_sthlm_corr <- protein_corr(pre_sthlm, "pre_sthlm_NA")
+
+## Post AbsPQN
+
+# AbsPQN1
+post_skane_corr_v1 <- protein_corr(post_skane_v1, "post_skane_v1")
+post_sthlm_corr_v1 <- protein_corr(post_sthlm_v1, "post_sthlm_v1")
+
+# AbsPQN2
+post_skane_corr_v2 <- protein_corr(post_skane_v2, "post_skane_v2")
+post_sthlm_corr_v2 <- protein_corr(post_sthlm_v2, "post_sthlm_v2")
+
+# Combining all of the data
+combined_corr <- bind_rows(pre_skane_corr, pre_sthlm_corr, post_skane_corr_v1, post_sthlm_corr_v1, post_skane_corr_v2, post_sthlm_corr_v2) |> 
+  separate_wider_delim(delim = "_", cols = Matrix, names = c("AbsPQN", "Region", "v1/v2"))
+```
+
+Creating plots, one for AbsPQN1 and one for AbsPQN 2 to allow for comparison of result.
+
+```{r}
+# AbsPQN1
+a <- combined_corr |> 
+  filter(`v1/v2` != "v2") |> 
+  ggplot(aes(x = Correlation, fill = AbsPQN, group = AbsPQN)) +
+    geom_density(alpha = 0.5) +
+    facet_wrap(~ Region, ncol = 2) +
+    labs(title = "Protein-Protein correlation, pre/post AbsPQN", subtitle = "AbsPQN1", x = "Correlation", y = "Density") +
+    theme_minimal() +
+    scale_x_continuous(limits = c(-1, 1)) +
+    scale_y_continuous(limits = c(0, 4)) +
+    scale_fill_npg() +
+    geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.3) +
+    geom_vline(xintercept = 0.5, linetype = "dashed", alpha = 0.3) +
+    geom_vline(xintercept = -0.5, linetype = "dashed", alpha = 0.3)
+
+# AbsPQN2
+b <- combined_corr |> 
+  filter(`v1/v2` != "v1") |> 
+  ggplot(aes(x = Correlation, fill = AbsPQN, group = AbsPQN)) +
+    geom_density(alpha = 0.5) +
+    facet_wrap(~ Region, ncol = 2) +
+    labs(title = "Protein-Protein correlation", subtitle = "AbsPQN2", x = "Correlation", y = "Density") +
+    theme_minimal() +
+    scale_x_continuous(limits = c(-1, 1)) +
+    scale_y_continuous(limits = c(0, 4)) +
+    scale_fill_npg() +
+    geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.3) +
+    geom_vline(xintercept = 0.5, linetype = "dashed", alpha = 0.3) +
+    geom_vline(xintercept = -0.5, linetype = "dashed", alpha = 0.3)
+```
+
+Plotting..
+
+```{r}
+a 
+b
+```
+
+Aside from density plot, another way to visualize the change between pre/post AbsPQN data is to plot them against each other in a scatter plot.The diagonal of the plot represents perfect correlation between pre/post.
+
+```{r}
+# Creating new column with protein pairs instead of separate proteins
+combined_corr <- combined_corr |> 
+  mutate(Corr_pairs = paste(Protein1, Protein2, sep = ","))
+```
+
+The following function will plot the scatter plots for both AbsPQN v1 and v2, and whether it comes from Skane or Stockholm.
+
+```{r}
+# Function for creating the scatterplots
+pre_post_plot <- function(df, method, region) {
+  
+  # Changes output, depending on whether data is AbsPQN 1 or 2
+  if (method == "v1") {
+    df <- filter(df, `v1/v2` != "v2")
+    method_title <- "AbsPQN1"
+  } else {
+    df <- filter(df, `v1/v2` != "v1")
+    method_title <- "AbsPQN2"
+  }
+  
+  # Changes output depending on the region
+  if (region == "skane") {
+    filter(df, Region == "skane")
+    region_title <- "Skane"
+    
+  } else {
+    filter(df, Region == "sthlm")
+    region_title <- "Sthlm"
+  }
+  
+  # Split into pre and post
+  pre <- filter(df, AbsPQN == "pre") |> 
+    select(Corr_pairs, Correlation)
+  post <- filter(df, AbsPQN == "post") |> 
+    select(Corr_pairs, Correlation)
+  
+  # Merge on "Corr_pairs"
+  combined <- merge(pre, post, by = "Corr_pairs", suffixes = c("_pre", "_post"))
+  
+  plot <- ggplot(combined, aes(x = Correlation_pre, y = Correlation_post)) +
+    geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+    geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+    labs(x = "Pre AbsPQN", y = "Post AbsPQN", title = region_title, subtitle = method_title) +
+    theme_minimal()
+
+  return(plot)
+}
+```
+
+Calling the scatter plot function..
+
+```{r}
+skane_v1_plot <- pre_post_plot(combined_corr, "v1", "skane")
+skane_v2_plot <- pre_post_plot(combined_corr, "v2", "skane")
+
+sthlm_v1_plot <- pre_post_plot(combined_corr, "v1", "sthlm")
+sthlm_v2_plot <- pre_post_plot(combined_corr, "v2", "sthlm")
+```
+
+Plotting..
+
+```{r}
+# Skane
+skane_v1_plot
+skane_v2_plot
+```
+
+```{r}
+# Stockholm
+sthlm_v1_plot
+sthlm_v2_plot
+```
+
+# Comparing primary & secondary blood draw
+
+First, we create a function which will extract the primary/secondary blood draw samples from the incoming NPX data frames and calculate the sample-sample correlations.
+```{r}
+prim_sec_corr <- function(clinical_df, npx_df, pre_post, method) {
+  # Filtering clinical data for samples with primary/secondary blood draws
+  sec <- clinical_df |> 
+    filter(primary_blood_draw == 0)
+  
+  prim <- clinical_df |> 
+    filter(individual_id %in% sec$individual_id) |> 
+    filter(primary_blood_draw == 1) 
+
+  # Filtering NPX data frame to match the clinical data
+  sec_npx <- npx_df |> 
+    filter(sample_id %in% sec$sample_id) |>
+    arrange(individual_id) |> # Ensures that the orders match between primary and secondary
+    select(-sample_id, -individual_id) |> # Removing both IDs so that they are not included in correlation calculations
+    t() # Transposes the data frame since we want to explore sample-sample correlation
+  
+  prim_npx <- npx_df |> 
+    filter(sample_id %in% prim$sample_id) |> 
+    arrange(individual_id) |> 
+    select(-sample_id, -individual_id) |> 
+    t()
+
+  # Calculating correlation between each primary/secondary sample
+  correlations <- numeric(ncol(prim_npx)) # Empty data frame to hold correlation values
+
+  for(i in 1:ncol(prim_npx)) {
+    correlations[i] <- cor(prim_npx[, i], sec_npx[, i], use = "complete.obs")
+  }
+  
+  colnames(correlations) <- colnames(prim_npx)
+  
+  correlations <- as_tibble(correlations) |> 
+    mutate(`Pre/Post` = pre_post) |> 
+    mutate(`v1/v2` = method)
+    
+  return(correlations)
+}
+```
+Calling the function and calculating the correlations. Also combining the data frames.
+```{r}
+# Pre AbsPQN
+pre_skane_prim_sec <- prim_sec_corr(clinical_skane, pre_skane, "pre", NA)
+pre_sthlm_prim_sec <- prim_sec_corr(clinical_sthlm, pre_sthlm, "pre", NA)
+
+# Post AbsPQN (v1 or v2)
+post_v1_skane_prim_sec <- prim_sec_corr(clinical_skane, post_skane_v1, "post", "v1")
+post_v2_skane_prim_sec <- prim_sec_corr(clinical_skane, post_skane_v2, "post", "v2")
+
+post_v1_sthlm_prim_sec <- prim_sec_corr(clinical_sthlm, post_sthlm_v1, "post", "v1")
+post_v2_sthlm_prim_sec <- prim_sec_corr(clinical_sthlm, post_sthlm_v2, "post", "v2")
+
+# Combining per region
+combined_skane <- bind_rows(pre_skane_prim_sec, post_v1_skane_prim_sec, post_v2_skane_prim_sec)
+
+combined_sthlm <- bind_rows(pre_sthlm_prim_sec, post_v1_sthlm_prim_sec, post_v2_sthlm_prim_sec)
+
+```
+
+Now, we need to create the actual density plots.
+```{r}
+
+ggplot(combined_skane, aes(x = value, y = after_stat(scaled), fill = `Pre/Post`, group = `Pre/Post`)) +
+  geom_density( alpha = 0.5) +
+  facet_wrap(~ `v1/v2`, ncol = 1) +
+  labs(x = "Correlation", y = "Density", title = "Comparing correlation primary/secondary", subtitle = "Skane") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(0.8, 1)) +
+  scale_fill_npg() +
+  theme(legend.position = "top") +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = -0.5, linetype = "dashed", alpha = 0.3)
+
+ggplot(combined_sthlm, aes(x = value, y = after_stat(scaled), fill = `Pre/Post`, group = `Pre/Post`)) +
+  geom_density( alpha = 0.5) +
+  facet_wrap(~ `v1/v2`, ncol = 1) +
+  labs(x = "Correlation", y = "Density", title = "Comparing correlation primary/secondary", subtitle = "Sthlm") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(0.8, 1)) +
+  scale_fill_npg() +
+  theme(legend.position = "top") +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = -0.5, linetype = "dashed", alpha = 0.3)
+```
+To summarize the differences between data before and after AbsPQN, a density plot for each region which contains the correlation between individual samples/protein before and after AbsPQN.
+```{r}
+# Quick correlation function
+correlater <- function(pre_df, post_df, method = "default") {
+  
+  filt_pre_df <- pre_df |> 
+    select(-sample_id, -individual_id)
+  filt_sec_df <- post_df |> 
+    select(-sample_id, -individual_id)
+  
+  if (method == "sample") {
+    filt_pre_df <- t(filt_pre_df)
+    filt_sec_df <- t(filt_sec_df)
+  } else {
+    
+  }
+  
+  correlations <- numeric(ncol(filt_pre_df)) # Empty data frame to hold correlation values
+
+  for(i in 1:ncol(filt_pre_df)) {
+    correlations[i] <- cor(filt_pre_df[, i], filt_sec_df[, i], use = "complete.obs")
+  }
+  
+  correlations_df <- tibble(correlation = correlations)
+    
+  return(correlations_df)
+}
+
+# Sample-sample correlation before and after AbsPQN (i.e. comparing Sample ID = 1 in pre_skane with Sample ID = 1 in post_skane)
+
+sample_skane_corr_v1 <- correlater(pre_skane, post_skane_v1, "sample") |> 
+  mutate(Method = "v1")
+sample_sthlm_corr_v1 <- correlater(pre_sthlm, post_sthlm_v1, "sample") |> 
+  mutate(Method = "v1")
+
+sample_skane_corr_v2 <- correlater(pre_skane, post_skane_v2, "sample") |> 
+  mutate(Method = "v2")
+sample_sthlm_corr_v2 <- correlater(pre_sthlm, post_sthlm_v2, "sample") |> 
+  mutate(Method = "v2")
+
+combined_sample_skane_corr <- bind_rows(sample_skane_corr_v1, sample_skane_corr_v2) |> 
+  mutate(Type = "sample-sample")
+
+combined_sample_sthlm_corr <- bind_rows(sample_sthlm_corr_v1, sample_sthlm_corr_v2) |> 
+  mutate(Type = "sample-sample")
+
+# Protein-protein correlation 
+prot_skane_corr_v1 <- correlater(pre_skane, post_skane_v1) |> 
+  mutate(Method = "v1")
+prot_sthlm_corr_v1 <- correlater(pre_sthlm, post_sthlm_v1) |> 
+  mutate(Method = "v1")
+
+prot_skane_corr_v2 <- correlater(pre_skane, post_skane_v2) |> 
+  mutate(Method = "v2")
+prot_sthlm_corr_v2 <- correlater(pre_sthlm, post_sthlm_v2) |> 
+  mutate(Method = "v2")
+
+combined_prot_skane_corr <- bind_rows(prot_skane_corr_v1, prot_skane_corr_v2) |> 
+  mutate(Type = "protein-protein")
+
+combined_prot_sthlm_corr <- bind_rows(prot_sthlm_corr_v1, prot_sthlm_corr_v2) |> 
+  mutate(Type = "protein-protein")
+
+# Final combination before plotting
+combined_corr_skane <- bind_rows(combined_sample_skane_corr, combined_prot_skane_corr)
+combined_corr_sthlm <- bind_rows(combined_sample_sthlm_corr, combined_prot_sthlm_corr)
+```
+
+Creating density plots:
+```{r}
+ggplot(combined_corr_skane, aes(x = correlation, y = after_stat(scaled), fill = Type, group = Type)) +
+  geom_density(alpha = 0.8) +
+  facet_wrap(~ Method, ncol = 2) +
+  labs(x = "Correlation", y = "Density", title = "Correlation sample-sample and protein-protein", subtitle = "Skane") +
+  theme_minimal() +
+  scale_fill_npg() +
+  scale_x_continuous(limits = c(0, 1)) +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = -0.5, linetype = "dashed", alpha = 0.3)
+
+ggplot(combined_corr_sthlm, aes(x = correlation, y = after_stat(scaled), fill = Type, group = Type)) +
+  geom_density(alpha = 0.8) +
+  facet_wrap(~ Method, ncol = 2) +
+  labs(x = "Correlation", y = "Density", title = "Correlation sample-sample and protein-protein", subtitle = "Stockholm") +
+  theme_minimal() +
+  scale_fill_npg() +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = -0.5, linetype = "dashed", alpha = 0.3)
+```
+# Plotting pre-npx against post-npx, scatter plot
+kaos
+```{r}
+# Skane
+long_skane_pre <- pre_skane |> 
+  arrange(sample_id) |> 
+  select(-sample_id, -individual_id) |> 
+  pivot_longer(everything()) |> 
+  rename(value_pre = value)
+
+long_skane_post_v1 <- post_skane_v1 |> 
+  arrange(sample_id) |> 
+  select(-sample_id, -individual_id) |> 
+  pivot_longer(everything()) |> 
+  rename(value_post = value)
+
+long_skane_post_v2 <- post_skane_v2 |> 
+  arrange(sample_id) |> 
+  select(-sample_id, -individual_id) |> 
+  pivot_longer(everything()) |> 
+  rename(value_post = value)
+
+v1_scatter_skane <- bind_cols(long_skane_pre, long_skane_post_v1$value_post) |> 
+  rename(value_post = ...3)
+v2_scatter_skane <- bind_cols(long_skane_pre, long_skane_post_v2$value_post) |> 
+  rename(value_post = ...3)
+```
+```{r}
+plot_skane_1 <- ggplot(v1_scatter_skane, aes(x = value_pre, y = value_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = "Pre AbsPQN", y = "Post AbsPQN",  title = "NPX for each protein pre/post", subtitle = "Skane - AbsPQN1") +
+  theme_minimal()
+
+plot_skane_2 <- ggplot(v2_scatter_skane, aes(x = value_pre, y = value_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = "Pre AbsPQN", y = "Post AbsPQN", title = "NPX for each protein pre/post", subtitle = "Skane - AbsPQN2") +
+  theme_minimal()
+```
+
+
+```{r}
+# Stockholm
+long_sthlm_pre <- pre_sthlm |> 
+  arrange(sample_id) |> 
+  select(-sample_id, -individual_id) |> 
+  pivot_longer(everything()) |> 
+  rename(value_pre = value)
+
+long_sthlm_post_v1 <- post_sthlm_v1 |> 
+  arrange(sample_id) |> 
+  select(-sample_id, -individual_id) |> 
+  pivot_longer(everything()) |> 
+  rename(value_post = value)
+
+long_sthlm_post_v2 <- post_sthlm_v2 |> 
+  arrange(sample_id) |> 
+  select(-sample_id, -individual_id) |> 
+  pivot_longer(everything()) |> 
+  rename(value_post = value)
+
+v1_scatter_sthlm <- bind_cols(long_sthlm_pre, long_sthlm_post_v1$value_post) |> 
+  rename(value_post = ...3)
+v2_scatter_sthlm <- bind_cols(long_sthlm_pre, long_sthlm_post_v2$value_post) |> 
+  rename(value_post = ...3)
+
+
+```
+
+```{r}
+plot_sthlm_1 <- ggplot(v1_scatter_sthlm, aes(x = value_pre, y = value_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = "Pre AbsPQN", y = "Post AbsPQN", subtitle = "Sthlm - AbsPQN1") +
+  theme_minimal()
+
+plot_sthlm_2 <- ggplot(v2_scatter_sthlm, aes(x = value_pre, y = value_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = "Pre AbsPQN", y = "Post AbsPQN", subtitle = "Sthlm - AbsPQN2") +
+  theme_minimal()
+```
+
+```{r}
+plot_skane_1 + plot_skane_2
+  
+  plot_sthlm_1+ plot_sthlm_2
+```
+
+# Plotting protein before and after correlation, per protein
+
+Here we plot the NPX before against after AbsPQN, for each protein in a separate scatter plot. All of the plots are saved in a PDF.
+```{r}
+# Pre AbsPQN
+pre_skane_long <- pre_skane |> 
+    pivot_longer(
+    -sample_id, 
+    names_to = "protein", 
+    values_to = "value_pre"
+  )
+pre_sthlm_long <- pre_sthlm |> 
+    pivot_longer(
+    -sample_id, 
+    names_to = "protein", 
+    values_to = "value_pre"
+  )
+
+
+# Post AbsPQN
+post_skane_long <- post_skane_v2 |> 
+    pivot_longer(
+    -sample_id, 
+    names_to = "protein", 
+    values_to = "value_post"
+  )
+post_sthlm_long <- post_sthlm_v2 |> 
+    pivot_longer(
+    -sample_id, 
+    names_to = "protein", 
+    values_to = "value_post"
+  )
+```
+
+
+```{r}
+# Skane PDF
+skane_combined <- merge(pre_skane_long, post_skane_long, by = c("sample_id", "protein"), suffixes = c("_pre", "_post"))
+
+correlation_df <- skane_combined |> 
+  group_by(protein) |> 
+  summarize(correlation = cor(value_pre, value_post, use = "complete.obs")) |> 
+  ungroup()
+
+skane_combined_with_corr <- merge(skane_combined, correlation_df, by = "protein")
+
+# Adjust these variables as needed
+facets_per_page <- 20  # Number of plots per page
+
+total_proteins <- length(unique(skane_combined_with_corr$protein))
+total_pages <- ceiling(total_proteins / facets_per_page)
+
+plot_page <- function(page_number, facets_per_page, data) {
+  start <- ((page_number - 1) * facets_per_page) + 1
+  end <- min(start + facets_per_page - 1, length(unique(data$protein)))
+  
+  protein_names <- unique(data$protein)[start:end]
+  data_subset <- data[data$protein %in% protein_names,]
+  
+  data_subset$protein_corr_label <- with(data_subset, paste(protein, sprintf("(r = %.2f)", correlation), sep=" "))
+  
+  plots <- ggplot(data_subset, aes(x = value_pre, y = value_post)) + 
+    geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+    facet_wrap(~ protein_corr_label, scales = "free", ncol = 4) +  # Adjust ncol as needed
+    theme_minimal() +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#265073") +
+    xlab("Pre Expression") +
+    ylab("Post Expression") +
+    ggtitle(sprintf("Protein Expression Pre vs. Post AbsPQN2 (Page %d)", page_number))
+  
+  return(plots)
+}
+
+# Calling
+pdf("skane_pre_post_abspqn_per_protein.pdf", width = 11, height = 8.5)
+for (page in 1:total_pages) {
+  print(plot_page(page, facets_per_page, skane_combined_with_corr))
+}
+dev.off()
+```
+
+
+```{r}
+# Stockholm PDF
+sthlm_combined <- merge(pre_sthlm_long, post_sthlm_long, by = c("sample_id", "protein"), suffixes = c("_pre", "_post"))
+
+correlation_df <- sthlm_combined |> 
+  group_by(protein) |> 
+  summarize(correlation = cor(value_pre, value_post, use = "complete.obs")) |> 
+  ungroup()
+
+sthlm_combined_with_corr <- merge(sthlm_combined, correlation_df, by = "protein")
+
+total_proteins <- length(unique(sthlm_combined_with_corr$protein))
+total_pages <- ceiling(total_proteins / facets_per_page)
+
+pdf("sthlm_pre_post_abspqn_per_protein.pdf", width = 11, height = 8.5)
+for (page in 1:total_pages) {
+  print(plot_page(page, facets_per_page, sthlm_combined_with_corr))
+}
+dev.off()
+```
+
+
+## Comparing IQR, Sample Median before and after AbsPQN
+
+```{r}
+median_iqr <- function(df) {
+  
+  df <- df |> 
+    select(-sample_id, -individual_id)
+  
+  medians <- apply(df, 1, median)
+  
+  # Compute IQR for each row
+  iqrs <- apply(df, 1, IQR)
+  
+  # Combine medians and IQRs into a results dataframe
+  results <- data.frame(median = medians, iqr = iqrs)
+
+  return(results)
+}
+
+# Pre
+median_iqr_skane <- median_iqr(pre_skane) |> 
+  rename(median_pre = median) |> 
+  rename(iqr_pre = iqr)
+median_iqr_sthlm <- median_iqr(pre_sthlm) |> 
+  rename(median_pre = median) |> 
+  rename(iqr_pre = iqr)
+
+# AbsPQN1
+median_iqr_skane_v1 <- median_iqr(post_skane_v1)|> 
+  rename(median_post = median) |> 
+  rename(iqr_post = iqr)
+median_iqr_sthlm_v1 <- median_iqr(post_sthlm_v1) |> 
+  rename(median_post = median) |> 
+  rename(iqr_post = iqr)
+
+# AbsPQN2
+median_iqr_skane_v2 <- median_iqr(post_skane_v2)|> 
+  rename(median_post = median) |> 
+  rename(iqr_post = iqr)
+median_iqr_sthlm_v2 <- median_iqr(post_sthlm_v2) |> 
+  rename(median_post = median) |> 
+  rename(iqr_post = iqr)
+
+
+# Combining into pairs
+
+# Skane
+skane_median_iqr_v1 <- bind_cols(median_iqr_skane, median_iqr_skane_v1)
+skane_median_iqr_v2 <- bind_cols(median_iqr_skane, median_iqr_skane_v2)
+
+# Sthlm
+sthlm_median_iqr_v1 <- bind_cols(median_iqr_sthlm, median_iqr_sthlm_v1)
+sthlm_median_iqr_v2 <- bind_cols(median_iqr_sthlm, median_iqr_sthlm_v2)
+
+
+```
+
+```{r}
+# IQR comparison, SKANE
+cor_iqr_skane_v1 <- cor(skane_median_iqr_v1$iqr_pre, skane_median_iqr_v1$iqr_post, use = "complete.obs")
+
+iqr_skane_1 <- ggplot(skane_median_iqr_v1, aes(x = iqr_pre, y = iqr_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = " IQR - Pre AbsPQN", y = "IQR - Post AbsPQN",  title = "IQR", subtitle = "Skane - AbsPQN1") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_iqr_skane_v1, 3)), hjust = 3, vjust = 2) +
+  theme_minimal()
+
+cor_iqr_skane_v2 <- cor(skane_median_iqr_v2$iqr_pre, skane_median_iqr_v2$iqr_post, use = "complete.obs")
+
+iqr_skane_2 <- ggplot(skane_median_iqr_v2, aes(x = iqr_pre, y = iqr_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = " IQR - Pre AbsPQN", y = "IQR - Post AbsPQN",  title = "IQR", subtitle = "Skane - AbsPQN2") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_iqr_skane_v2, 3)), hjust = 3, vjust = 2) +
+  theme_minimal()
+
+# IQR comparison, STHLM
+cor_iqr_sthlm_v1 <- cor(sthlm_median_iqr_v1$iqr_pre, sthlm_median_iqr_v1$iqr_post, use = "complete.obs")
+
+iqr_sthlm_1 <- ggplot(sthlm_median_iqr_v1, aes(x = iqr_pre, y = iqr_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = " IQR - Pre AbsPQN", y = "IQR - Post AbsPQN",  title = "IQR", subtitle = "Sthlm - AbsPQN1") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_iqr_sthlm_v1, 3)), hjust = 3, vjust = 2) +
+  theme_minimal()
+
+cor_iqr_sthlm_v2 <- cor(sthlm_median_iqr_v2$iqr_pre, sthlm_median_iqr_v2$iqr_post, use = "complete.obs")
+
+iqr_sthlm_2 <- ggplot(sthlm_median_iqr_v2, aes(x = iqr_pre, y = iqr_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = " IQR - Pre AbsPQN", y = "IQR - Post AbsPQN",  title = "IQR", subtitle = "Sthlm - AbsPQN2") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_iqr_sthlm_v2, 3)), hjust = 3, vjust = 2) +
+  theme_minimal()
+```
+
+```{r}
+# Calling IQR plots
+
+iqr_skane_1 + iqr_sthlm_1
+
+iqr_skane_2 + iqr_sthlm_2
+```
+
+
+```{r}
+# Median comparison, SKANE
+cor_skane_v1 <- cor(skane_median_iqr_v1$median_pre, skane_median_iqr_v1$median_post, use = "complete.obs")
+
+
+median_skane_1 <- ggplot(skane_median_iqr_v1, aes(x = median_pre, y = median_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = " Median - Pre AbsPQN", y = "IQR - Post AbsPQN",  title = "Median", subtitle = "Skane - AbsPQN1") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_skane_v1, 3)), hjust = 3, vjust = 2) +
+  theme_minimal()
+
+cor_skane_v2 <- cor(skane_median_iqr_v2$median_pre, skane_median_iqr_v2$median_post, use = "complete.obs")
+
+median_skane_2 <- ggplot(skane_median_iqr_v2, aes(x = median_pre, y = median_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = " Median - Pre AbsPQN", y = "IQR - Post AbsPQN",  title = "Median", subtitle = "Skane - AbsPQN2") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_skane_v2, 3)), hjust = 3, vjust = 2) +
+  theme_minimal()
+
+# Median comparison, STHLM
+cor_sthlm_v1 <- cor(sthlm_median_iqr_v1$median_pre, sthlm_median_iqr_v1$median_post, use = "complete.obs")
+
+median_sthlm_1 <- ggplot(sthlm_median_iqr_v1, aes(x = median_pre, y = median_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = " Median - Pre AbsPQN", y = "IQR - Post AbsPQN",  title = "Median", subtitle = "Sthlm - AbsPQN1") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_sthlm_v1, 3)), hjust = 3, vjust = 2) +
+  theme_minimal()
+
+cor_sthlm_v2 <- cor(sthlm_median_iqr_v2$median_pre, sthlm_median_iqr_v2$median_post, use = "complete.obs")
+
+median_sthlm_2 <- ggplot(sthlm_median_iqr_v2, aes(x = median_pre, y = median_post)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = " Median - Pre AbsPQN", y = "IQR - Post AbsPQN",  title = "Median", subtitle = "Sthlm - AbsPQN2") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_skane_v1, 3)), hjust = 3, vjust = 2) +
+  theme_minimal()
+```
+
+```{r}
+# Calling median plots
+median_skane_1 + median_sthlm_1
+
+median_skane_2 + median_sthlm_2
+```
+
+### Does AbsPQN2 increase similarity between Skane and Stockholm?
+Plotting IQRs against each other to see how their relationship changes after AbsPQN2.
+
+IQR FOR SAMPLES
+
+
+The code is very chaotic from here on out...
+
+
+```{r}
+# Since we compare between regions, need to combine data sets differently compared to how it was done above
+
+region_iqr_skane <- median_iqr_skane |> 
+  select(iqr_pre) |> 
+  rename(skane_iqr = iqr_pre)
+
+region_iqr_sthlm <- median_iqr_sthlm |> 
+  select(iqr_pre) |> 
+  rename(sthlm_iqr = iqr_pre)
+
+# Different length Skane and Sthlm, trim some elements from the longer df
+region_iqr_sthlm_trimmed <- region_iqr_sthlm[1:nrow(region_iqr_skane), ]
+
+region_similarity_pre <- cbind(region_iqr_skane, region_iqr_sthlm_trimmed) |> 
+  rename(sthlm_iqr = region_iqr_sthlm_trimmed)
+```
+
+```{r}
+# Same for post AbsPQN2
+region_iqr_skane_v2 <- median_iqr_skane_v2 |> 
+  select(iqr_post) |> 
+  rename(skane_iqr = iqr_post)
+
+region_iqr_sthlm_v2 <- median_iqr_sthlm_v2 |> 
+  select(iqr_post) |> 
+  rename(sthlm_iqr = iqr_post)
+
+# Different length Skane and Sthlm, trim some elements from the longer df
+region_iqr_sthlm_trimmed_v2 <- region_iqr_sthlm_v2[1:nrow(region_iqr_skane_v2), ]
+
+region_similarity_post <- cbind(region_iqr_skane_v2, region_iqr_sthlm_trimmed_v2) |> 
+  rename(sthlm_iqr = region_iqr_sthlm_trimmed_v2)
+```
+
+Making plots
+```{r}
+# IQR comparison, pre
+ggplot(region_similarity_pre, aes(x = skane_iqr, y = sthlm_iqr)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = " IQR Skane", y = "IQR Stockholm",  title = "IQR similarity between regions - Samples", subtitle = "Pre AbsPQN2") +
+  theme_minimal()
+
+# IQR comparison, post
+ggplot(region_similarity_post, aes(x = skane_iqr, y = sthlm_iqr)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = " IQR Skane", y = "IQR Stockholm",  title = "IQR similarity between regions - Samples", subtitle = "Post AbsPQN2") +
+  theme_minimal()
+
+```
+IQR FOR PROTEINS
+```{r}
+median_iqr_prot <- function(df) {
+  
+  df <- df |> 
+    select(-sample_id, -individual_id)
+  
+  medians <- apply(df, 2, median)
+  
+  # Compute IQR for each row
+  iqrs <- apply(df, 2, IQR)
+  
+  # Combine medians and IQRs into a results dataframe
+  results <- data.frame(median = medians, iqr = iqrs)
+
+  return(results)
+}
+
+# Pre
+median_iqr_skane <- median_iqr_prot(pre_skane) |> 
+  rename(median_pre = median) |> 
+  rename(iqr_pre = iqr) |> 
+  rownames_to_column(var = "protein")
+median_iqr_sthlm <- median_iqr_prot(pre_sthlm) |> 
+  rename(median_pre = median) |> 
+  rename(iqr_pre = iqr) |> 
+  rownames_to_column(var = "protein")
+
+# AbsPQN2
+median_iqr_skane_v2 <- median_iqr_prot(post_skane_v2)|> 
+  rename(median_post = median) |> 
+  rename(iqr_post = iqr) |> 
+  rownames_to_column(var = "protein")
+median_iqr_sthlm_v2 <- median_iqr_prot(post_sthlm_v2) |> 
+  rename(median_post = median) |> 
+  rename(iqr_post = iqr) |> 
+  rownames_to_column(var = "protein")
+
+# Selecting IQR
+region_iqr_skane <- median_iqr_skane |> 
+  select(iqr_pre, protein) |> 
+  rename(skane_iqr = iqr_pre)
+
+region_iqr_sthlm <- median_iqr_sthlm |> 
+  select(iqr_pre, protein) |> 
+  rename(sthlm_iqr = iqr_pre)
+
+# Different length Skane and Sthlm, trim some elements from the longer df
+#region_iqr_sthlm_trimmed <- region_iqr_sthlm[1:nrow(region_iqr_skane), ]
+
+region_similarity_pre <- left_join(region_iqr_skane, region_iqr_sthlm, by = "protein")
+
+
+# Same for post AbsPQN2
+region_iqr_skane_v2 <- median_iqr_skane_v2 |> 
+  select(iqr_post, protein) |> 
+  rename(skane_iqr = iqr_post)
+
+region_iqr_sthlm_v2 <- median_iqr_sthlm_v2 |> 
+  select(iqr_post, protein) |> 
+  rename(sthlm_iqr = iqr_post)
+
+region_similarity_post <- left_join(region_iqr_skane_v2, region_iqr_sthlm_v2, by = "protein")
+
+# Calculate the correlation coefficient
+cor_pre <- cor(region_similarity_pre$skane_iqr, region_similarity_pre$sthlm_iqr, use = "complete.obs")
+
+# Plot with annotation
+ggplot(region_similarity_pre, aes(x = skane_iqr, y = sthlm_iqr)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = "IQR Skane", y = "IQR Stockholm", title = "IQR similarity between regions - Proteins", subtitle = "Pre AbsPQN2") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_pre, 3)), hjust = 3, vjust = 2) +
+  theme_minimal()
+
+
+# Calculate the correlation coefficient
+cor_post <- cor(region_similarity_post$skane_iqr, region_similarity_post$sthlm_iqr, use = "complete.obs")
+
+# Plot with annotation
+ggplot(region_similarity_post, aes(x = skane_iqr, y = sthlm_iqr)) +
+  geom_point(color = "#4DBBD5FF", alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  labs(x = "IQR Skane", y = "IQR Stockholm", title = "IQR similarity between regions - Proteins", subtitle = "Post AbsPQN2") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_post, 3)), hjust = 3, vjust = 2) +
+  theme_minimal()
+
+```

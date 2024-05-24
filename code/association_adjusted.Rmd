@@ -1,0 +1,411 @@
+```{r}
+library(tidyverse)
+library(viridis)
+library(FactoMineR)
+library(factoextra)
+library(pheatmap)
+library(umap)
+library(patchwork)
+library(limma)
+library(car)
+library(ggridges)
+library(ggsci)
+library(patchwork)
+
+source("association_functions.R")
+```
+
+```{r}
+# Loading NPX- and clinical data
+npx_skane <- read_csv("../clean_data/npx_skane_adj.csv", show_col_types = FALSE) # Using NPX which removed log2 during AbsPQN
+clinical_skane <- read_csv("../clean_data/clinical_skane_filtered.csv", show_col_types = FALSE)
+
+npx_sthlm <- read_csv("../clean_data/npx_sthlm_adj.csv", show_col_types = FALSE)
+clinical_sthlm <- read_csv("../clean_data/clinical_sthlm_filtered.csv", show_col_types = FALSE)
+
+npx_raw <- read.csv("../data/2024-01-23_karma_pro_npx.csv") # No QC
+sinfo_raw <- read.csv("../data/2024-01-23_karma_pro_sinfo.csv") # No QC
+
+npx_skane <- npx_skane |> 
+  filter(sample_id %in% clinical_skane$sample_id)
+
+npx_sthlm <- npx_sthlm |> 
+  filter(sample_id %in% clinical_sthlm$sample_id)
+```
+
+```{r}
+# Can only use clinical variables without missing values, thus, here the NPX data will be filtered to only include samples with complete variables
+
+# Alcohol
+clinical_skane_alcohol <- clinical_skane |> 
+  filter(!is.na(alcohol_gram_week))
+npx_skane_alcohol <- npx_skane |> 
+  filter(sample_id %in% clinical_skane_alcohol$sample_id)
+
+clinical_sthlm_alcohol <- clinical_sthlm |> 
+  filter(!is.na(alcohol_gram_week))
+npx_sthlm_alcohol <- npx_sthlm |> 
+  filter(sample_id %in% clinical_sthlm_alcohol$sample_id)
+
+# Smoking
+clinical_skane_smoking<- clinical_skane |> 
+  filter(!is.na(smoking_status))
+npx_skane_smoking <- npx_skane |> 
+  filter(sample_id %in% clinical_skane_smoking$sample_id)
+
+clinical_sthlm_smoking<- clinical_sthlm |> 
+  filter(!is.na(smoking_status))
+npx_sthlm_smoking <- npx_sthlm |> 
+  filter(sample_id %in% clinical_sthlm_smoking$sample_id)
+
+# Hormonal treatment status: 2 = current, 1 = previous, 0 = never
+clinical_skane_hrt <- clinical_skane |> 
+  filter(!is.na(mht_status))
+npx_skane_hrt <- npx_skane |> 
+  filter(sample_id %in% clinical_skane_hrt$sample_id)
+
+clinical_sthlm_hrt <- clinical_sthlm |> 
+  filter(!is.na(mht_status))
+npx_sthlm_hrt <- npx_sthlm |> 
+  filter(sample_id %in% clinical_sthlm_hrt$sample_id)
+
+# Density
+clinical_skane_density <- clinical_skane |> 
+  filter(!is.na(stratus_densearea_cm2))
+npx_skane_density <- npx_skane |> 
+  filter(sample_id %in% clinical_skane_density$sample_id)
+
+clinical_sthlm_density <- clinical_sthlm |> 
+  filter(!is.na(stratus_densearea_cm2))
+npx_sthlm_density <- npx_sthlm |> 
+  filter(sample_id %in% clinical_sthlm_density$sample_id)
+```
+
+# Effect of clinical variables on NPX (e.g. age)
+
+## Volcano plots, before/after NPX is adjusted for clinical variables
+
+```{r}
+# Differential expression analysis function
+DEA_func <- function(df, clin_df, variable_string) {
+  # Merge clinical and gene expression data based on sample ID
+  clin_df <- clin_df |> 
+    select(all_of(variable_string), sample_id)
+  
+  merged_df <- df |>
+    left_join(clin_df, by = "sample_id")
+  
+  # Prepare data for linear regression
+  outcome <- merged_df[[variable_string]]
+  predictors <- merged_df %>% 
+    select(-all_of(variable_string), -sample_id) %>% 
+    data.frame()
+  
+  # Initialize results data frame
+  results <- data.frame(Protein = colnames(predictors), Coefficient = NA, PValue = NA, stringsAsFactors = FALSE)
+  
+  # Loop through each gene to perform linear regression
+  for (i in seq_along(colnames(predictors))) {
+    npx <- predictors[, i]
+    model <- glm(outcome ~ npx)  # Linear regression (default family is gaussian)
+    summary_model <- summary(model)
+    
+    # Extract coefficient and p-value for the gene
+    predictor_name <- colnames(predictors)[i]
+    results$Estimate[i] <- summary_model$coefficients["npx", "Estimate"]
+    results$PValue[i] <- summary_model$coefficients["npx", "Pr(>|t|)"]
+ 
+  }
+  # Adjust p-values for multiple testing, for example, using Benjamini-Hochberg method
+  results$AdjPValue <- p.adjust(results$PValue, method = "BH")
+
+  # Return the results
+  return(results)
+}
+
+# Plotting DEA results in volcanoplot
+volcano <- function(results) {
+
+  significance_threshold <- -log10(0.05)
+  
+  results <- results |> 
+    mutate(rank = rank(`AdjPValue`)) |> 
+    mutate(label = ifelse(rank <= 10, as.character(Protein), NA))
+  
+  volcano_plot <- ggplot(results, aes(x = Estimate, y = -log10(`AdjPValue`))) +
+    geom_point(aes(color = ifelse(-log10(`AdjPValue`) > significance_threshold, "Significant", "Not significant")), alpha = 0.8) +
+    geom_hline(yintercept = significance_threshold, linetype = "dashed") +
+    scale_color_npg() +
+    ggrepel::geom_text_repel(aes(label = label), box.padding = 0.1, point.padding = 1, 
+                segment.color = 'grey50', size = 3, max.iter = 10000) +
+    labs(color = "Significance") +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  return(volcano_plot)
+}
+```
+
+#### Age
+```{r}
+library(ggsci)
+# Effect of age on NPX
+skane_age <- DEA_func(npx_skane, clinical_skane, "age")
+sthlm_age <- DEA_func(npx_sthlm, clinical_sthlm, "age")
+
+skane_age_10 <- skane_age[1:10, ]
+sthlm_age_10 <- sthlm_age[1:10, ]
+
+age_skane <- volcano(skane_age) + ggtitle("Age", subtitle = "Skåne")
+age_sthlm <- volcano(sthlm_age) + ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank())
+
+age_skane + age_sthlm
+```
+
+#### BMI
+```{r}
+# Effect of bmi on NPX
+skane_bmi <- DEA_func(npx_skane, clinical_skane, "bmi")
+sthlm_bmi <- DEA_func(npx_sthlm, clinical_sthlm, "bmi")
+
+skane_bmi_10 <- skane_bmi[1:10, ]
+sthlm_bmi_10 <- sthlm_bmi[1:10, ]
+
+bmi_skane <- volcano(skane_bmi) + ggtitle("BMI", subtitle = "Skåne")
+bmi_sthlm <- volcano(sthlm_bmi) + ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank())
+
+bmi_skane + bmi_sthlm
+
+```
+
+#### Alcohol g/week
+```{r}
+# Effect of alcohol g/week on NPX
+skane_alc <- DEA_func(npx_skane_alcohol, clinical_skane_alcohol, "alcohol_gram_week")
+sthlm_alc<- DEA_func(npx_sthlm_alcohol, clinical_sthlm_alcohol, "alcohol_gram_week")
+
+alc_skane <- volcano(skane_alc) + ggtitle("Alcohol (grams/week)", subtitle = "Skåne") + ylim(0,15)
+alc_sthlm <- volcano(sthlm_alc) + ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right") + ylim(0,15)
+
+alc_skane + alc_sthlm
+
+```
+some proteins are conserved between regions, some are not! useful to somewhat validate results
+ano(sthlm_smoke) + ggtitle("Stockholm - Smoking status")
+#### dense area
+```{r}
+# Removing effect of age before looking at density!
+
+# Effect of density
+skane_density <- DEA_func(npx_skane_density, clinical_skane_density, "stratus_densearea_cm2")
+sthlm_density <- DEA_func(npx_sthlm_density, clinical_sthlm_density, "stratus_densearea_cm2")
+
+density_skane <- volcano(skane_density) + ggtitle("Measured dense area of breast (cm²)", subtitle = "Skåne") + ylim(0, 2)
+density_sthlm <- volcano(sthlm_density) + ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank()) + ylim(0, 2)
+
+density_skane + density_sthlm
+```
+
+
+```{r}
+skane_sage <- DEA_func(npx_skane, clinical_skane, "sample_age")
+sthlm_sage <- DEA_func(npx_sthlm, clinical_sthlm, "sample_age")
+
+volcano(skane_sage) + ggtitle("Skane - sample age")
+volcano(sthlm_sage) + ggtitle("Stockholm - sample age")
+```
+
+Since x_BC is a binary outcome, let's test logistic regression instead of linear regression which doesn't really fit for binary outcomes. 
+
+```{r}
+skane_x <- DEA_func_logistic(npx_skane, clinical_skane, "x_BC")
+
+sthlm_x <- DEA_func_logistic(npx_sthlm, clinical_sthlm, "x_BC")
+
+x_skane <- volcano_logistic(skane_x) + ggtitle("Breast cancer (case/control)", subtitle = "Skåne")
+x_sthlm <- volcano_logistic(sthlm_x)+ ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank())
+
+x_skane + x_sthlm
+```
+
+```{r}
+skane_prim <- DEA_func_logistic(npx_skane, clinical_skane, "primary_blood_draw") |> 
+  mutate(logFC = Coefficient)
+
+volcano_logistic(skane_prim) + ggtitle("Skane - primary_blood_draw")
+
+sthlm_prim <- DEA_func_logistic(npx_sthlm, clinical_sthlm, "primary_blood_draw") |> 
+  mutate(logFC = Coefficient)
+
+volcano_logistic(sthlm_prim) + ggtitle("Stockholm - primary_blood_draw")
+```
+```{r}
+clinical_skane <- clinical_skane |> 
+  mutate(menopause = ifelse(menopause_status %in% c(1, 2), 1, 2))
+
+clinical_sthlm <- clinical_sthlm |> 
+  mutate(menopause = ifelse(menopause_status %in% c(1, 2), 1, 2))
+
+skane_meno <- DEA_func_logistic(npx_skane, clinical_skane, "menopause") |> 
+  mutate(logFC = Coefficient)
+
+sthlm_meno <- DEA_func_logistic(npx_sthlm, clinical_sthlm, "menopause") |> 
+  mutate(logFC = Coefficient) 
+
+meno_skane <- volcano_logistic(skane_meno) + ggtitle("Menopause (pre- & peri vs. postmenopausal)", subtitle = "Skåne")
+meno_sthlm <- volcano_logistic(sthlm_meno)+ ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right")
+
+meno_skane + meno_sthlm
+```
+
+# Ordinal analysis
+```{r}
+skane_meno_ordinal <- clm_maker(npx_skane, clinical_skane, "menopause_status")
+b <- volcano_logistic(skane_meno_ordinal) + ggtitle("Menopause status", subtitle = "Skåne") + ylim(0, 5)
+
+sthlm_meno_ordinal <- clm_maker(npx_sthlm, clinical_sthlm, "menopause_status")
+a <- volcano_logistic(sthlm_meno_ordinal) + ggtitle("Menopause status", subtitle = "Stockholm") + ylim(0, 5)
+
+b + a
+```
+
+```{r}
+skane_stage <- clm_maker(npx_skane, clinical_skane, "cancer_stage")
+volcano_logistic(skane_stage) + ggtitle("Skane - cancer_stage")
+
+sthlm_stage <- clm_maker(npx_sthlm, clinical_sthlm, "cancer_stage")
+volcano_logistic(sthlm_stage) + ggtitle("Stockholm - cancer_stage")
+```
+
+# Multinomial association analysis
+
+Since smoking and MHT aren't ordinal, then we need to employ a mulitnomial regression instead.
+```{r}
+skane_smoke <- clm_maker(npx_skane, clinical_skane, "smoking_status")
+
+sthlm_smoke <- clm_maker(npx_sthlm, clinical_sthlm, "smoking_status")
+
+smoke_skane <- volcano_logistic(skane_smoke) + ggtitle("Smoking status (never, previous, current user)", subtitle = "Skåne")
+smoke_sthlm <- volcano_logistic(sthlm_smoke)+ ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right")
+
+smoke_skane + smoke_sthlm
+```
+
+```{r}
+skane_mht <- clm_maker(npx_skane, clinical_skane, "mht_status")
+
+sthlm_mht <- clm_maker(npx_sthlm, clinical_sthlm, "mht_status") 
+
+mht_skane <- volcano_logistic(skane_mht) + ggtitle("Hormonal treatment (never, previous, current user)", subtitle = "Skåne")
+mht_sthlm <- volcano_logistic(sthlm_mht)+ ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right")
+
+mht_skane + mht_sthlm
+```
+
+
+```{r}
+age_skane + age_sthlm
+bmi_skane + bmi_sthlm
+alc_skane + alc_sthlm
+density_skane + density_sthlm
+smoke_skane + smoke_sthlm
+mht_skane + mht_sthlm
+b + a 
+```
+```{r}
+library(VGAM)
+```
+
+VGLM takes the first level of the factor as the reference.
+
+Levels of each factor (1, 2, 3 <-> 0, 1, 2):
+- smoking (never, previous, current)
+- menopause (pre, peri, post)
+- mht (never, previous, current)
+
+```{r}
+test_skane <- npx_skane |> 
+  left_join(clinical_skane |> select(sample_id, menopause_status), by = "sample_id") |> 
+  select(-sample_id)
+
+test_skane$menopause_status <- as.factor(test_skane$menopause_status)
+
+fit <- vglm(menopause_status ~ MUC.16, data = test_skane, family = multinomial)
+ 
+test_results <- summary(fit)
+
+test <- coef(test_results)
+
+```
+
+# Multinomial analysis
+
+## Menopause status
+```{r}
+# By default, the "premenopause" is taken as the reference. Thus, the interaction between peri and post are not compared in this case
+skane_multi_meno <- multinomial_analysis(npx_skane, clinical_skane, "menopause_status")
+sthlm_multi_meno <- multinomial_analysis(npx_sthlm, clinical_sthlm, "menopause_status")
+```
+
+```{r}
+skane_meno_1 <- volcano_multi(skane_multi_meno, "1") + ggtitle("Pre vs. Peri", subtitle = "Skåne")
+skane_meno_2 <- volcano_multi(skane_multi_meno, "2") + ggtitle("Pre vs. Post", subtitle = "Skåne")
+
+sthlm_meno_1 <- volcano_multi(sthlm_multi_meno, "1") + ggtitle("Pre vs. Peri", subtitle = "Stockholm")
+sthlm_meno_2 <- volcano_multi(sthlm_multi_meno, "2") + ggtitle("Pre vs. Post", subtitle = "Stockholm")
+
+skane_meno_1 + sthlm_meno_1
+skane_meno_2 + sthlm_meno_2
+```
+
+## Smoking status
+```{r}
+skane_multi_smoke <- multinomial_analysis(npx_skane, clinical_skane, "smoking_status")
+sthlm_multi_smoke <- multinomial_analysis(npx_sthlm, clinical_sthlm, "smoking_status")
+```
+
+```{r}
+skane_smoke_1 <- volcano_multi(skane_multi_smoke, "1") + ggtitle("Never vs. previous smoking", subtitle = "Skåne") + ylim(0, 20)
+skane_smoke_2 <- volcano_multi(skane_multi_smoke, "2") + ggtitle("Never vs. current smoking", subtitle = "Skåne") + ylim(0, 20)
+
+sthlm_smoke_1 <- volcano_multi(sthlm_multi_smoke, "1") + ggtitle("Never vs. previous smoking", subtitle = "Stockholm") + ylim(0, 20)
+sthlm_smoke_2 <- volcano_multi(sthlm_multi_smoke, "2") + ggtitle("Never vs. current smoking", subtitle = "Stockholm") + ylim(0, 20)
+
+skane_smoke_1 + sthlm_smoke_1
+skane_smoke_2 + sthlm_smoke_2
+```
+
+## Mht status
+```{r}
+skane_multi_mht <- multinomial_analysis(npx_skane, clinical_skane, "mht_status")
+sthlm_multi_mht <- multinomial_analysis(npx_sthlm, clinical_sthlm, "mht_status")
+```
+
+```{r}
+skane_mht_1 <- volcano_multi(skane_multi_mht, "1") + ggtitle("Never vs. previous hormonal treatment", subtitle = "Skåne") + ylim(0, 5)
+skane_mht_2 <- volcano_multi(skane_multi_mht, "2") + ggtitle("Never vs. current hormonal treatment", subtitle = "Skåne") + ylim(0, 5)
+
+sthlm_mht_1 <- volcano_multi(sthlm_multi_mht, "1") + ggtitle("Never vs. previous hormonal treatment", subtitle = "Stockholm") + ylim(0, 5)
+sthlm_mht_2 <- volcano_multi(sthlm_multi_mht, "2") + ggtitle("Never vs. current hormonal treatment", subtitle = "Stockholm")  + ylim(0, 5)
+
+skane_mht_1 + sthlm_mht_1
+skane_mht_2 + sthlm_mht_2
+```
+
+## Cancer stage
+```{r}
+skane_multi_stage <- multinomial_analysis(npx_skane, clinical_skane, "cancer_stage")
+sthlm_multi_stage <- multinomial_analysis(npx_sthlm, clinical_sthlm, "cancer_stage")
+```
+
+```{r}
+skane_stage_1 <- volcano_multi(skane_multi_stage, "1") + ggtitle("Never vs. Previous", subtitle = "Skåne")
+skane_stage_2 <- volcano_multi(skane_multi_stage, "2") + ggtitle("Never vs. Current", subtitle = "Skåne")
+
+sthlm_stage_1 <- volcano_multi(sthlm_multi_stage, "1") + ggtitle("Never vs. Previous", subtitle = "Stockholm")
+sthlm_stage_2 <- volcano_multi(sthlm_multi_stage, "2") + ggtitle("Never vs. Current", subtitle = "Stockholm")
+
+skane_stage_1 + sthlm_stage_1
+skane_stage_2 + sthlm_stage_2
+```
+

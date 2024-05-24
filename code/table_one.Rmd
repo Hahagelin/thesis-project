@@ -1,0 +1,59 @@
+
+```{r}
+library(table1)
+```
+
+```{r}
+# Reading in data
+npx_na <- read.csv("../data/2024-01-23_karma_pro_npx.csv") # Expression data
+sinfo_na <- read.csv("../data/2024-04-10_karma_pro_sinfo.csv") # Clinical data
+binfo <- read.csv("../data/2024-01-23_karma_pro_binfo.csv") # Binder info for KARMA pro
+
+
+# Making factors out of the variables whilst also labelling the different conditions
+sinfo_na$region <- factor(sinfo_na$region,
+                          levels = c("skane", "stockholm"),
+                          labels = c("Skåne", "Stockholm"))
+sinfo_na$x_BC <- factor(sinfo_na$x_BC, levels = c(1, 0),
+                        labels = c("Case", "Control"))
+sinfo_na$smoking_status <- factor(sinfo_na$smoking_status, levels = c(0, 1, 2),
+                        labels = c("Never used", "Previous user", "Current user"))
+sinfo_na$mht_status <- factor(sinfo_na$mht_status, levels = c(0, 1, 2),
+                        labels = c("Never used", "Previous user", "Current user"))
+sinfo_na$menopause_status <- factor(sinfo_na$menopause_status, levels = c(1, 2, 3),
+                        labels = c("Pre-", "Peri-", "Postmenopausal"))
+
+# Creating labels for the variables
+label(sinfo_na$age) <- "Age"
+label(sinfo_na$bmi) <- "BMI"
+label(sinfo_na$x_BC) <- "Breast Cancer"
+label(sinfo_na$alcohol_gram_week) <- "Alcohol"
+label(sinfo_na$smoking_status) <- "Smoking"
+label(sinfo_na$mht_status) <- "Hormonal treatment"
+label(sinfo_na$menopause_status) <- "Menopausal status"
+label(sinfo_na$stratus_densearea_cm2) <- "Measured breast dense area"
+
+# Specifying units for the variables
+units(sinfo_na$age) <- "years"
+units(sinfo_na$bmi) <- "kg/m2"
+units(sinfo_na$alcohol_gram_week) <- "gram/week"
+units(sinfo_na$stratus_densearea_cm2) <- "cm2"
+
+# Removing the median from the default output
+my.render.cont <- function(x) {
+    with(stats.apply.rounding(stats.default(x), digits=2), c("",
+        "Mean (SD)"=sprintf("%s (&plusmn; %s)", MEAN, SD)))
+}
+my.render.cat <- function(x) {
+    c("", sapply(stats.default(x), function(y) with(y,
+        sprintf("%d (%0.0f %%)", FREQ, PCT))))
+}
+
+# Calling the table, specifying which variables should be displayed
+table1(~ age + bmi + x_BC + alcohol_gram_week + smoking_status + stratus_densearea_cm2 + menopause_status + mht_status | region, data = sinfo_na, overall=c(left="Total"))
+```
+
+
+
+
+

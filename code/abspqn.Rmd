@@ -1,0 +1,193 @@
+
+# AbsPQN
+
+Loading packages and NPX data.
+
+```{r}
+# Packages + AbsPQN function
+library(tidyverse)
+library(OlinkAnalyze)
+library(ggplot2)
+library(patchwork)
+library(umap)
+source("norm_AbsPQN.R")
+
+# Data, undergone QC so samples and proteins have been removed
+npx_skane_raw <- read_csv("../clean_data/npx_skane_filtered.csv", show_col_types = FALSE) 
+npx_sthlm_raw <- read_csv("../clean_data/npx_sthlm_filtered.csv", show_col_types = FALSE)
+
+binfo <- read.csv("protein_information.csv")
+
+clinical_skane <- read_csv("../clean_data/clinical_skane_filtered.csv", show_col_types = FALSE)
+clinical_sthlm <- read_csv("../clean_data/clinical_sthlm_filtered.csv", show_col_types = FALSE)
+```
+
+To avoid normalizing the sample_ids, they are kept as rownames instead of a separate column.
+
+```{r}
+# Converting sample_ids to rownames
+npx_skane <- npx_skane_raw |> 
+  arrange(sample_id) |> 
+  column_to_rownames(var = "sample_id")  
+
+npx_sthlm <- npx_sthlm_raw |>  
+  arrange(sample_id) |> 
+  column_to_rownames(var = "sample_id")
+```
+
+We will use two types of AbsPQN: The first is done by simply inputting the data in its current format (log2) and using the output directly, let's call this AbsPQN1 (v1). Secondly, AbsPQN2 (v2) is done by removing log2 by taking the inverse log transformation (2^), applying AbsPQN, then reapplying log2 to the data.
+
+```{r}
+# Kept in log2(data) format
+npx_skane_v1 <- npx_skane
+npx_sthlm_v1 <- npx_sthlm
+
+# Removing log2
+npx_skane_v2 <- 2^(npx_skane)
+npx_sthlm_v2 <- 2^(npx_sthlm)
+```
+
+Now, we apply the AbsPQN function on the data sets. *Note!* AbsPQN cannot take tibbles as input, therefore, they are converted into matrices.
+
+```{r}
+# AbsPQN1
+result_skane_v1 <- abspqn(as.matrix(npx_skane_v1), by_s = NULL, by_b = NULL) 
+result_sthlm_v1 <- abspqn(as.matrix(npx_sthlm_v1), by_s = NULL, by_b = NULL)
+
+# AbsPQN2
+result_skane_v2 <- abspqn(as.matrix(npx_skane_v2), by_s = NULL, by_b = NULL) |> 
+  log2()
+result_sthlm_v2 <- abspqn(as.matrix(npx_sthlm_v2), by_s = NULL, by_b = NULL) |> 
+  log2()
+```
+
+Lastly, before outputting the data, the data frames need to be cleaned up.
+
+```{r}
+# AbsPQN1
+norm_npx_skane_v1 <- result_skane_v1 |> 
+  as_tibble(rownames = NA) |>  # Converted back into a tibble
+  mutate(sample_id = rownames(result_skane_v1)) |> # Restores the sample_ids as a column, from the row names
+  select(sample_id, everything()) # Reorders the columns so that sample_id is first
+
+norm_npx_sthlm_v1 <- result_sthlm_v1 |> 
+  as_tibble(rownames = NA) |> 
+  mutate(sample_id = rownames(result_sthlm_v1)) |> 
+  select(sample_id, everything())
+
+# AbsPQN2
+norm_npx_skane_v2 <- result_skane_v2 |> 
+  as_tibble(rownames = NA) |> 
+  mutate(sample_id = rownames(result_skane_v2)) |> 
+  select(sample_id, everything())
+
+norm_npx_sthlm_v2 <- result_sthlm_v2 |> 
+  as_tibble(rownames = NA) |> 
+  mutate(sample_id = rownames(result_sthlm_v2)) |> 
+  select(sample_id, everything())
+```
+
+Saving the data sets as csv files.
+
+```{r}
+# Kept in log2
+write_csv(norm_npx_skane_v1, file.path("../clean_data/norm_npx_skane_v1.csv"))
+write_csv(norm_npx_sthlm_v1, file.path("../clean_data/norm_npx_sthlm_v1.csv"))
+
+# Removed log2
+write_csv(norm_npx_skane_v2, file.path("../clean_data/norm_npx_skane_v2.csv"))
+write_csv(norm_npx_sthlm_v2, file.path("../clean_data/norm_npx_sthlm_v2.csv"))
+```
+
+# Visualization
+
+## Olink IQR vs. Median plot
+
+To evaluate the effect of AbsPQN, let's reexamine the IQR vs. Median plot, supplied by the OlinkAnalyze package. Before creating the plots, some extra data is needed and the NPX data sets need to be converted into long format (for plotting).
+
+```{r}
+# Retrieving necessary info about panels and proteins
+olink_ids <- data.frame(Protein = binfo$column_name, OlinkID = binfo$olink_id) # OlinkID
+panel_ids <- data.frame(Protein = binfo$column_name, Panel = binfo$panel)      # Type of panel  
+
+# Creating function for adding info, converting to long, and plotting IQR vs. Median plot
+olink_plot_maker <- function(df, plot_title) {
+  
+  # Converting to long, then adding information 
+  long_df <- pivot_longer(df, cols = -sample_id, names_to = "Protein", values_to = "NPX") |> 
+    left_join(olink_ids, by = "Protein") |> 
+    left_join(panel_ids, by = "Protein") |> 
+    rename(SampleID = sample_id) |> 
+    mutate(SampleID = as.character(SampleID))
+  
+  # Plot
+  IQR_median_plot<- long_df |> 
+  olink_qc_plot(color_g = "Panel", IQR_outlierDef = 5, median_outlierDef = 5) +
+    labs(title = plot_title)
+  
+  return(IQR_median_plot)
+}
+  
+# Calling the function
+IQR_a <- olink_plot_maker(norm_npx_skane_v1, "Skane - AbsPQN1")
+IQR_b <- olink_plot_maker(norm_npx_sthlm_v1, "Stockholm - AbsPQN1")
+IQR_c <- olink_plot_maker(norm_npx_skane_v2, "Skane - AbsPQN2")
+IQR_d <- olink_plot_maker(norm_npx_sthlm_v2, "Stockholm - AbsPQN2")
+```
+
+Plotting..
+
+```{r}
+# Skane
+IQR_a
+IQR_c
+
+# Sthlm
+IQR_b
+IQR_d 
+```
+
+## UMAP
+
+Here, a function for running UMAP, extracting the results, and plotting them is created.
+
+```{r}
+# Creating function for both running, extracting, and plotting UMAP results
+umap_plot <- function(df, plot_title) {
+  
+  # Running UMAP
+  umap_df <- df |> 
+    select(-sample_id) |> 
+    umap()
+  
+  # Extracting UMAP variables
+  df$UMAP1 <- umap_df$layout[, 1]
+  df$UMAP2 <- umap_df$layout[, 2]
+  
+  # Making UMAP plot
+  plot <- ggplot(df, aes(x = UMAP1, y = UMAP2, color = protein_name))
+    geom_point(alpha = 0.8) +
+    labs(title = plot_title, x = "UMAP 1", y = "UMAP 2") +
+    theme_minimal() +
+    scale_color_viridis_c()
+  
+  return(plot)
+}
+```
+
+Now, we run the function to run UMAP and generate the plots for each of the data sets.
+
+```{r}
+# Using the function to create a plot for each data set
+umap_a <- umap_plot(norm_npx_skane_v1, "Skane - AbsPQN1")
+umap_b <- umap_plot(norm_npx_sthlm_v1, "Stockholm - AbsPQN1")
+umap_c <- umap_plot(norm_npx_skane_v2, "Skane - AbsPQN2")
+umap_d <- umap_plot(norm_npx_sthlm_v2, "Stockholm - AbsPQN2")
+```
+
+Plotting..
+
+```{r}
+umap_a + umap_c
+umap_b + umap_d
+```

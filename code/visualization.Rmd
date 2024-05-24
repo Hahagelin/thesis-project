@@ -1,0 +1,410 @@
+```{r}
+library(tidyverse)
+library(viridis)
+library(FactoMineR)
+library(factoextra)
+library(OlinkAnalyze)
+library(pheatmap)
+library(umap)
+library(ggforce)
+```
+
+## Loading data
+
+```{r}
+# Clinical data
+clinical_skane <- read_csv(file.path("../clean_data/clinical_skane_filtered.csv"), show_col_types = FALSE)
+clinical_sthlm <- read_csv(file.path("../clean_data/clinical_sthlm_filtered.csv"), show_col_types = FALSE)
+
+# NPX data
+qc_skane <- read_csv(file.path("../clean_data/npx_skane_filtered.csv"), show_col_types = FALSE) |>  # (qc = only qc)
+  mutate(type = "qc")
+v2_skane <- read_csv(file.path("../clean_data/norm_npx_skane_v2.csv"), show_col_types = FALSE) |>  # (v2 = abspqn2)
+  mutate(type = "v2")
+adj_skane <- read_csv(file.path("../clean_data/adjusted_npx_skane.csv"), show_col_types = FALSE) |>  # (adj = clin. adjusted)
+  mutate(type = "adj")
+
+qc_sthlm <- read_csv(file.path("../clean_data/npx_sthlm_filtered.csv"), show_col_types = FALSE) |> 
+  mutate(type = "qc")
+v2_sthlm <- read_csv(file.path("../clean_data/norm_npx_sthlm_v2.csv"), show_col_types = FALSE) |> 
+  mutate(type = "v2")
+adj_sthlm <- read_csv(file.path("../clean_data/adjusted_npx_sthlm.csv"), show_col_types = FALSE) |> 
+  mutate(type = "adj")
+```
+
+With the "type" column, the different types of data can be plotted together, although they need to be put into the same data frame.
+
+```{r}
+comb_skane <- bind_rows(qc_skane, v2_skane, adj_skane)
+comb_sthlm <- bind_rows(qc_sthlm, v2_sthlm, adj_sthlm)
+```
+
+# Density plots
+
+Function for creating density plots for each of the proteins in the dataset.
+
+```{r}
+# Here we decide the number of plots per page
+facets_per_page <- 25  # Adjust this number based on your needs
+
+total_facets <- 159
+total_pages <- ceiling(total_facets / facets_per_page)
+
+# Function for histograms
+plot_page <- function(page_number, facets_per_page, data) {
+  
+  long_data <- data |> 
+    select(-sample_id) |> 
+    pivot_longer(-type, values_to = "value", names_to = "name")
+
+  start <- ((page_number - 1) * facets_per_page) + 1
+  end <- min(start + facets_per_page - 1, total_facets)
+  
+  facet_names <- unique(long_data$name)[start:end]
+  data_subset <- long_data |> filter(name %in% facet_names)
+  
+  plots <- ggplot(data_subset, aes(x = value, fill = type, group = type)) + 
+    geom_histogram(alpha = 0.8) +
+    facet_wrap(~ name, scales = "free") +
+    theme_minimal() +
+    scale_fill_npg() + 
+    theme(legend.position = "none")
+  
+  return(plots)
+}
+```
+
+### Skane density plots
+```{r}
+# Only qc data
+pdf("../images/density_plots/qc_skane.pdf", paper = "a4")
+# Loop through each page and plot the facets
+walk(1:total_pages, ~ {
+  print(plot_page(.x, facets_per_page, qc_skane))
+})
+# Close the PDF device
+dev.off()
+
+# AbsPQN2 data
+pdf("../images/density_plots/v2_skane.pdf", paper = "a4")
+# Loop through each page and plot the facets
+walk(1:total_pages, ~ {
+  print(plot_page(.x, facets_per_page, v2_skane))
+})
+# Close the PDF device
+dev.off()
+
+# Adjusted data
+pdf("../images/density_plots/adj_skane.pdf", paper = "a4")
+# Loop through each page and plot the facets
+walk(1:total_pages, ~ {
+  print(plot_page(.x, facets_per_page, adj_skane))
+})
+# Close the PDF device
+dev.off()
+
+# All in the same plot
+pdf("../images/density_plots/comb_skane.pdf", paper = "a4")
+# Loop through each page and plot the facets
+walk(1:total_pages, ~ {
+  print(plot_page(.x, facets_per_page, comb_skane))
+})
+# Close the PDF device
+dev.off()
+```
+### Stockolm density plots
+```{r}
+# Only qc data
+pdf("../images/density_plots/qc_sthlm.pdf", paper = "a4")
+# Loop through each page and plot the facets
+walk(1:total_pages, ~ {
+  print(plot_page(.x, facets_per_page, qc_sthlm))
+})
+# Close the PDF device
+dev.off()
+
+# AbsPQN2 data
+pdf("../images/density_plots/v2_sthlm.pdf", paper = "a4")
+# Loop through each page and plot the facets
+walk(1:total_pages, ~ {
+  print(plot_page(.x, facets_per_page, v2_sthlm))
+})
+# Close the PDF device
+dev.off()
+
+# Adjusted data
+pdf("../images/density_plots/adj_sthlm.pdf", paper = "a4")
+# Loop through each page and plot the facets
+walk(1:total_pages, ~ {
+  print(plot_page(.x, facets_per_page, adj_sthlm))
+})
+# Close the PDF device
+dev.off()
+
+# All in the same plot
+pdf("../images/density_plots/comb_sthlm.pdf", paper = "a4")
+# Loop through each page and plot the facets
+walk(1:total_pages, ~ {
+  print(plot_page(.x, facets_per_page, comb_sthlm))
+})
+# Close the PDF device
+dev.off()
+```
+
+# Correlation plots / Heatmaps
+```{r}
+# Skane
+corr_qc_skane <- qc_skane |> 
+  select(-sample_id, -type) |> 
+  cor(method = "spearman", use = "complete.obs") |> 
+  as_tibble(rownames = "protein") |> 
+  column_to_rownames(var = "protein")
+
+corr_v2_skane <- v2_skane |> 
+  select(-sample_id, -type) |> 
+  cor(method = "spearman", use = "complete.obs") |> 
+  as_tibble(rownames = "protein") |> 
+  column_to_rownames(var = "protein")
+
+corr_adj_skane <- adj_skane |> 
+  select(-sample_id, -type) |> 
+  cor(method = "spearman", use = "complete.obs") |> 
+  as_tibble(rownames = "protein") |> 
+  column_to_rownames(var = "protein")
+
+# Stockholm
+corr_qc_sthlm <- qc_sthlm |> 
+  select(-sample_id, -type) |> 
+  cor(method = "spearman", use = "complete.obs") |> 
+  as_tibble(rownames = "protein") |> 
+  column_to_rownames(var = "protein")
+
+corr_v2_sthlm <- v2_sthlm |> 
+  select(-sample_id, -type) |> 
+  cor(method = "spearman", use = "complete.obs") |> 
+  as_tibble(rownames = "protein") |> 
+  column_to_rownames(var = "protein")
+
+corr_adj_sthlm <- adj_sthlm |> 
+  select(-sample_id, -type) |> 
+  cor(method = "spearman", use = "complete.obs") |> 
+  as_tibble(rownames = "protein") |> 
+  column_to_rownames(var = "protein")
+
+```
+
+
+With the correlation matrices created, we can plot them in correlation heatmaps.
+
+```{r}
+custom_col = colorRampPalette(c("blue", "white", "red"))(200) # Controls the color palette
+breaks = seq(-1, 1, length.out = length(custom_col) + 1)
+
+
+
+# Skane PDF
+pdf("../images/heatmaps/skane_correlation_plots.pdf", width = 25, height = 25)
+
+pheatmap(corr_qc_skane, 
+         cluster_rows = TRUE,    # Cluster rows (variables)
+         cluster_cols = TRUE,    # Cluster columns (variables)
+         color = custom_col,  # Color palette
+         breaks = breaks,
+         main = "qc_skane - Clustered Correlation Heatmap")
+pheatmap(corr_v2_skane, 
+         cluster_rows = TRUE,    # Cluster rows (variables)
+         cluster_cols = TRUE,    # Cluster columns (variables)
+         color = custom_col,  # Color palette
+         breaks = breaks,
+         main = "v2_skane - Clustered Correlation Heatmap")
+pheatmap(corr_adj_skane, 
+         cluster_rows = TRUE,    # Cluster rows (variables)
+         cluster_cols = TRUE,    # Cluster columns (variables)
+         color = custom_col,  # Color palette
+         breaks = breaks,
+         main = "adj_skane - Clustered Correlation Heatmap")
+
+# Close the PDF device
+dev.off()
+
+# Stockholm PDF
+pdf("../images/heatmaps/sthlm_correlation_plots.pdf", width = 25, height = 25)
+
+custom_col = colorRampPalette(c("blue", "white", "red"))(200) # Controls the color palette
+
+pheatmap(corr_qc_sthlm, 
+         cluster_rows = TRUE,    # Cluster rows (variables)
+         cluster_cols = TRUE,    # Cluster columns (variables)
+         color = custom_col,  # Color palette
+         breaks = breaks,
+         main = "qc_sthlm - Clustered Correlation Heatmap")
+pheatmap(corr_v2_sthlm, 
+         cluster_rows = TRUE,    # Cluster rows (variables)
+         cluster_cols = TRUE,    # Cluster columns (variables)
+         color = custom_col,  # Color palette
+         breaks = breaks,
+         main = "v2_sthlm - Clustered Correlation Heatmap")
+pheatmap(corr_adj_sthlm, 
+         cluster_rows = TRUE,    # Cluster rows (variables)
+         cluster_cols = TRUE,    # Cluster columns (variables)
+         color = custom_col,  # Color palette
+         breaks = breaks,
+         main = "adj_sthlm - Clustered Correlation Heatmap")
+
+# Close the PDF device
+dev.off()
+```
+
+```{r}
+# Converting to long format for easier management
+long_corr_adj_skane <- corr_adj_skane |> 
+  as_tibble(rownames = "Protein1") |> 
+  pivot_longer(-Protein1, names_to = "Protein2", values_to = "Correlation") |> 
+  filter(!(Protein1 == Protein2)) |> # Removing diagonal (self correlation) 
+  filter(Correlation >= 0.5)
+
+long_corr_adj_sthlm <- corr_adj_sthlm |> 
+  as_tibble(rownames = "Protein1") |> 
+  pivot_longer(-Protein1, names_to = "Protein2", values_to = "Correlation") |> 
+  filter(!(Protein1 == Protein2))
+```
+
+```{r}
+skane_pheatmap <- pheatmap(corr_adj_skane, cluster_rows = TRUE, cluster_cols = TRUE)
+dev.off() # Preventing plot output
+clusters <- cutree(skane_pheatmap$tree_row, k = 4)
+
+# Identifying the cluster which is highly correlated in the plot
+protein_name <- "protein_name"  
+protein_cluster <- clusters[protein_name]
+
+# Saving the protein names found in this cluster
+skane_clusters <- names(clusters)[clusters == 3] |> 
+  as_tibble()
+write.csv(skane_clusters, "skane_clustered_proteins")
+
+sthlm_pheatmap <- pheatmap(corr_adj_sthlm, cluster_rows = TRUE, cluster_cols = TRUE)
+dev.off() # Preventing plot output
+clusters <- cutree(sthlm_pheatmap$tree_row, k = 4)
+
+# Identifying the cluster which is highly correlated in the plot
+protein_name <- "protein"  
+protein_cluster <- clusters[protein_name]
+
+# Saving the protein names found in this cluster
+sthlm_cluster <- names(clusters)[clusters == 3] |> 
+  as_tibble()
+write.csv(sthlm_cluster, "sthlm_clustered_proteins")
+```
+
+# PCA
+
+Skane PCA grid
+```{r}
+# Adding x_BC
+skane_x <- clinical_skane |> 
+  select(x_BC, sample_id) |> 
+  mutate(x_BC = as_factor(x_BC))
+
+# Prepping for PCA using recipes
+adj_skane_prep <- 
+  recipe(~ ., data = adj_skane |> select(-type)) |>
+  update_role(sample_id, new_role = "ID") |> # Ensures that sample_id isn't used in any calculations
+  step_center(all_predictors()) |>  
+  step_scale(all_predictors()) |> 
+  step_pca(all_predictors(), num_comp = 3) |>  
+  prep() |> 
+  juice() |> 
+  left_join(skane_x, by = "sample_id") |> 
+  select(-sample_id)
+
+ggplot(adj_skane_prep, aes(x = .panel_x, y = .panel_y, color = x_BC, fill = x_BC)) + 
+  geom_point(alpha = 0.3, shape = 16, size = 1) + 
+  geom_autodensity(alpha = 0.3) +
+  facet_matrix(vars(-x_BC), layer.diag = 2, grid.y.diag = FALSE) +
+  scale_color_npg() + 
+  scale_fill_npg()
+```
+
+Stockholm PCA grid
+```{r}
+# Adding x_BC
+sthlm_x <- clinical_sthlm |> 
+  select(x_BC, sample_id) |> 
+  mutate(x_BC = as_factor(x_BC))
+
+# Prepping for PCA using recipes
+adj_sthlm_prep <- 
+  recipe(~ ., data = adj_sthlm |> select(-type)) |>
+  update_role(sample_id, new_role = "ID") |>
+  step_center(all_predictors()) |>  
+  step_scale(all_predictors()) |> 
+  step_pca(all_predictors(), num_comp = 3) |>  
+  prep() |> 
+  juice() |> 
+  left_join(sthlm_x, by = "sample_id") |> 
+  select(-sample_id)
+
+ggplot(adj_sthlm_prep, aes(x = .panel_x, y = .panel_y, color = x_BC, fill = x_BC)) + 
+  geom_point(alpha = 0.2, shape = 16, size = 0.5) + 
+  geom_autodensity(alpha = 0.3) +
+  facet_matrix(vars(-x_BC), layer.diag = 2, grid.y.diag = FALSE) +
+  scale_color_npg() + 
+  scale_fill_npg()
+```
+
+## UMAP
+
+```{r}
+# Run the UMAP
+umap_skane <- adj_skane |> 
+  select(-sample_id, -type) |> 
+  umap()
+umap_sthlm <- adj_sthlm |> 
+  select(-sample_id, -type) |> 
+  umap
+
+umap_adj_skane <- adj_skane |> 
+  left_join(skane_x, by = "sample_id")
+
+umap_adj_sthlm <- adj_sthlm |> 
+  left_join(sthlm_x, by = "sample_id")
+
+# Add the UMAP variables to the NPX data frames
+umap_adj_skane$UMAP1 <- umap_skane$layout[, 1]
+umap_adj_skane$UMAP2 <- umap_skane$layout[, 2]
+
+umap_adj_sthlm$UMAP1 <- umap_sthlm$layout[, 1]
+umap_adj_sthlm$UMAP2 <- umap_sthlm$layout[, 2]
+```
+
+```{r}
+# Clustering using kmeans
+set.seed(123) # For reproducibility
+clusters_skane <- kmeans(umap_skane$layout, centers = 3) 
+clusters_sthlm <- kmeans(umap_sthlm$layout, centers = 3)
+
+# Add cluster assignments to the data frames
+umap_adj_skane$Cluster <- as.factor(clusters_skane$cluster) 
+umap_adj_sthlm$Cluster <- as.factor(clusters_sthlm$cluster)
+
+umap_adj_skane <- umap_adj_skane |> 
+  left_join(clinical_skane, by = "sample_id")
+
+umap_adj_sthlm <- umap_adj_sthlm |> 
+  left_join(clinical_sthlm, by = "sample_id")
+```
+
+```{r}
+ggplot(umap_adj_skane, aes(x = UMAP1, y = UMAP2, color = clinical_variable)) +
+  geom_point(alpha = 0.8) + 
+  theme_minimal() +
+  labs(title = "UMAP Projection - Skane", x = "UMAP 1", y = "UMAP 2")
+
+ggplot(umap_adj_sthlm, aes(x = UMAP1, y = UMAP2, color = clinical_variable)) +
+  geom_point(alpha = 0.8) + 
+  theme_minimal() +
+  labs(title = "UMAP Projection - Stockholm", x = "UMAP 1", y = "UMAP 2")
+```
+
+

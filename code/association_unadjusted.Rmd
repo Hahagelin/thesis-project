@@ -1,0 +1,706 @@
+```{r}
+library(tidyverse)
+library(viridis)
+library(FactoMineR)
+library(factoextra)
+library(pheatmap)
+library(umap)
+library(patchwork)
+library(limma)
+library(car)
+library(ggridges)
+library(ggsci)
+
+source("association_functions.R")
+```
+
+```{r}
+# Loading NPX- and clinical data
+npx_skane <- read_csv("../clean_data/norm_npx_skane_v2.csv", show_col_types = FALSE) # Using NPX which removed log2 during AbsPQN
+clinical_skane <- read_csv("../clean_data/clinical_skane_filtered.csv", show_col_types = FALSE)
+
+npx_sthlm <- read_csv("../clean_data/norm_npx_sthlm_v2.csv", show_col_types = FALSE)
+clinical_sthlm <- read_csv("../clean_data/clinical_sthlm_filtered.csv", show_col_types = FALSE)
+
+npx_raw <- read.csv("../data/2024-01-23_karma_pro_npx.csv") # No QC
+sinfo_raw <- read.csv("../data/2024-01-23_karma_pro_sinfo.csv") # No QC
+```
+
+```{r}
+# Can only use clinical variables without missing values, thus, here the NPX data will be filtered to only include samples with complete variables
+
+# Alcohol
+clinical_skane_alcohol <- clinical_skane |> 
+  filter(!is.na(alcohol_gram_week))
+npx_skane_alcohol <- npx_skane |> 
+  filter(sample_id %in% clinical_skane_alcohol$sample_id)
+
+clinical_sthlm_alcohol <- clinical_sthlm |> 
+  filter(!is.na(alcohol_gram_week))
+npx_sthlm_alcohol <- npx_sthlm |> 
+  filter(sample_id %in% clinical_sthlm_alcohol$sample_id)
+
+# Smoking
+clinical_skane_smoking<- clinical_skane |> 
+  filter(!is.na(smoking_status))
+npx_skane_smoking <- npx_skane |> 
+  filter(sample_id %in% clinical_skane_smoking$sample_id)
+
+clinical_sthlm_smoking<- clinical_sthlm |> 
+  filter(!is.na(smoking_status))
+npx_sthlm_smoking <- npx_sthlm |> 
+  filter(sample_id %in% clinical_sthlm_smoking$sample_id)
+
+# Hormonal treatment status: 2 = current, 1 = previous, 0 = never
+clinical_skane_hrt <- clinical_skane |> 
+  filter(!is.na(mht_status))
+npx_skane_hrt <- npx_skane |> 
+  filter(sample_id %in% clinical_skane_hrt$sample_id)
+
+clinical_sthlm_hrt <- clinical_sthlm |> 
+  filter(!is.na(mht_status))
+npx_sthlm_hrt <- npx_sthlm |> 
+  filter(sample_id %in% clinical_sthlm_hrt$sample_id)
+
+# Density
+clinical_skane_density <- clinical_skane |> 
+  filter(!is.na(stratus_densearea_cm2))
+npx_skane_density <- npx_skane |> 
+  filter(sample_id %in% clinical_skane_density$sample_id)
+
+clinical_sthlm_density <- clinical_sthlm |> 
+  filter(!is.na(stratus_densearea_cm2))
+npx_sthlm_density <- npx_sthlm |> 
+  filter(sample_id %in% clinical_sthlm_density$sample_id)
+```
+
+# Effect of clinical variables on NPX (e.g. age)
+
+## Evaluating effect of plate_id
+
+```{r}
+plate_ev <- function(npx, clinical) {
+  
+  clinical <- clinical |> 
+    select(sample_id, plate_id)
+  
+  npx_plate <- npx |> 
+    left_join(clinical, by = "sample_id") |> 
+    pivot_longer(cols = -c(sample_id, plate_id), names_to = "Protein", values_to = "value")  
+  
+  plot <- ggplot(npx_plate, aes(x = as.factor(plate_id), y = value)) +
+    geom_boxplot(aes(fill = as.factor(plate_id))) +
+    scale_fill_viridis_d(option = "magma") +
+    theme_minimal() + 
+    xlab("Plate ID") +
+    ylab("NPX") +
+    guides(fill = "none")
+  
+  return(plot)
+}
+```
+
+```{r}
+skane_plate <- plate_ev(npx_skane, clinical_skane)
+sthlm_plate <- plate_ev(npx_sthlm, clinical_sthlm)
+raw_plate <- plate_ev(npx_raw, sinfo_raw)
+
+skane_plate + ggtitle("Skane") + sthlm_plate + ggtitle("Stockholm")
+raw_plate + ggtitle("Raw data")
+```
+
+```{r}
+skane_plate_ids <- clinical_skane |> 
+  select(plate_id, sample_id)
+
+sthlm_plate_ids <- clinical_sthlm |> 
+  select(plate_id, sample_id)
+
+common_proteins <- intersect(names(npx_skane), names(npx_sthlm)) 
+
+common_skane <- npx_skane |> 
+  select(all_of(common_proteins)) |> 
+  mutate(Region = "Skane") |> 
+  left_join(skane_plate_ids, by = "sample_id")
+common_sthlm <- npx_sthlm |> 
+  select(all_of(common_proteins)) |> 
+  mutate(Region = "Stockholm") |> 
+  left_join(sthlm_plate_ids, by = "sample_id")
+
+combined_npx <- bind_rows(common_skane, common_sthlm) |> 
+  pivot_longer(-c("sample_id", "plate_id", "Region"))
+  
+```
+
+```{r}
+combined_boxplots <- ggplot(combined_npx, aes(x = Region, y = value, fill = Region)) +
+  geom_boxplot() +
+  scale_fill_npg() +
+  theme_minimal() + 
+  xlab("Region") +
+  ylab("NPX") +
+  guides(fill = "none")
+
+combined_boxplots
+```
+
+**Conclusion:** Plate ID differences within regions seem to be negligible. However, a slight difference is observed between regions. If the need to combine the data becomes relevant, then the region difference should be adjusted for. In other words, individual plate ids do not need to be adjusted for.
+
+## Volcano plots, before/after NPX is adjusted for clinical variables
+
+#### Age
+```{r}
+library(ggsci)
+# Effect of age on NPX
+skane_age <- DEA_func(npx_skane, clinical_skane, "age")
+sthlm_age <- DEA_func(npx_sthlm, clinical_sthlm, "age")
+
+skane_age_10 <- skane_age[1:10, ]
+sthlm_age_10 <- sthlm_age[1:10, ]
+
+age_skane <- volcano(skane_age) + ggtitle("Age", subtitle = "Skåne")
+age_sthlm <- volcano(sthlm_age) + ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right")
+
+age_skane + age_sthlm
+```
+
+#### BMI
+```{r}
+# Effect of bmi on NPX
+skane_bmi <- DEA_func(npx_skane, clinical_skane, "bmi")
+sthlm_bmi <- DEA_func(npx_sthlm, clinical_sthlm, "bmi")
+
+skane_bmi_10 <- skane_bmi[1:10, ]
+sthlm_bmi_10 <- sthlm_bmi[1:10, ]
+
+bmi_skane <- volcano(skane_bmi) + ggtitle("BMI", subtitle = "Skåne") + ylim(0,30)
+bmi_sthlm <- volcano(sthlm_bmi) + ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right") + ylim(0, 30)
+
+bmi_skane + bmi_sthlm
+```
+
+#### Alcohol g/week
+```{r}
+# Effect of alcohol g/week on NPX
+skane_alc <- DEA_func(npx_skane_alcohol, clinical_skane_alcohol, "alcohol_gram_week")
+sthlm_alc<- DEA_func(npx_sthlm_alcohol, clinical_sthlm_alcohol, "alcohol_gram_week")
+
+alc_skane <- volcano(skane_alc) + ggtitle("Alcohol (grams/week)", subtitle = "Skåne")
+alc_sthlm <- volcano(sthlm_alc) + ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right")
+
+alc_skane + alc_sthlm
+```
+some proteins are conserved between regions, some are not! useful to somewhat validate results
+ano(sthlm_smoke) + ggtitle("Stockholm - Smoking status")
+
+```{r}
+# Removing effect of age before looking at density!
+
+# Effect of density
+skane_density <- DEA_func(npx_skane_density, clinical_skane_density, "stratus_densearea_cm2")
+sthlm_density <- DEA_func(npx_sthlm_density, clinical_sthlm_density, "stratus_densearea_cm2")
+
+density_skane <- volcano(skane_density) + ggtitle("Measured dense area of breast (cm²)", subtitle = "Skåne")
+density_sthlm <- volcano(sthlm_density) + ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right")
+
+density_skane + density_sthlm
+```
+
+```{r}
+skane_sage <- DEA_func(npx_skane, clinical_skane, "sample_age")
+sthlm_sage <- DEA_func(npx_sthlm, clinical_sthlm, "sample_age")
+
+volcano(skane_sage) + ggtitle("Skane - sample age")
+volcano(sthlm_sage) + ggtitle("Stockholm - sample age")
+```
+
+```{r}
+skane_x <- DEA_func_logistic(npx_skane, clinical_skane, "x_BC") |> 
+  mutate(logFC = Coefficient) 
+
+sthlm_x <- DEA_func_logistic(npx_sthlm, clinical_sthlm, "x_BC") |> 
+  mutate(logFC = Coefficient)
+
+x_skane <- volcano_logistic(skane_x) + ggtitle("Breast cancer (case/control)", subtitle = "Skåne")
+x_sthlm <- volcano_logistic(sthlm_x)+ ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right")
+
+x_skane + x_sthlm
+```
+
+```{r}
+skane_smoke <- DEA_func_logistic(npx_skane, clinical_skane, "smoking_status") |> 
+  mutate(logFC = Coefficient)
+
+
+sthlm_smoke <- DEA_func_logistic(npx_sthlm, clinical_sthlm, "smoking_status") |> 
+  mutate(logFC = Coefficient) 
+
+smoke_skane <- volcano_logistic(skane_smoke) + ggtitle("Smoking status (never, previous, current user)", subtitle = "Skåne")
+smoke_sthlm <- volcano_logistic(sthlm_smoke)+ ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right")
+
+smoke_skane + smoke_sthlm
+```
+
+```{r}
+skane_mht <- DEA_func_logistic(npx_skane, clinical_skane, "mht_status") |> 
+  mutate(logFC = Coefficient) 
+
+sthlm_mht <- DEA_func_logistic(npx_sthlm, clinical_sthlm, "mht_status") |> 
+  mutate(logFC = Coefficient) 
+
+mht_skane <- volcano_logistic(skane_mht) + ggtitle("Hormonal treatment (never, previous, current user)", subtitle = "Skåne")
+mht_sthlm <- volcano_logistic(sthlm_mht)+ ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right")
+
+mht_skane + mht_sthlm
+```
+```{r}
+clinical_skane <- clinical_skane |> 
+  mutate(menopause = ifelse(menopause_status %in% c(1, 2), 1, 2))
+
+clinical_sthlm <- clinical_sthlm |> 
+  mutate(menopause = ifelse(menopause_status %in% c(1, 2), 1, 2))
+
+skane_meno <- DEA_func_logistic(npx_skane, clinical_skane, "menopause") |> 
+  mutate(logFC = Coefficient)
+
+sthlm_meno <- DEA_func_logistic(npx_sthlm, clinical_sthlm, "menopause") |> 
+  mutate(logFC = Coefficient) 
+
+meno_skane <- volcano_logistic(skane_meno) + ggtitle("Menopause (pre- & peri vs. postmenopausal)", subtitle = "Skåne")
+meno_sthlm <- volcano_logistic(sthlm_meno)+ ggtitle(" ",subtitle = "Stockholm") + theme(axis.title.y = element_blank(), legend.position = "right")
+
+meno_skane + meno_sthlm
+```
+
+```{r}
+skane_x <- DEA_func_logistic(npx_skane, clinical_skane |> filter(!(cancer_stage == 0)), "cancer_stage") |> 
+  mutate(logFC = Coefficient)
+
+volcano_logistic(skane_x) + ggtitle("Skane - cancer_stage")
+
+sthlm_x <- DEA_func_logistic(npx_sthlm, clinical_sthlm |> filter(!(cancer_stage == 0)), "cancer_stage") |> 
+  mutate(logFC = Coefficient)
+
+volcano_logistic(sthlm_x) + ggtitle("Stockholm - cancer_stage")
+```
+
+```{r}
+skane_x <- DEA_func_logistic(npx_skane, clinical_skane, "primary_blood_draw") |> 
+  mutate(logFC = Coefficient)
+
+volcano_logistic(skane_x) + ggtitle("Skane - primary_blood_draw")
+
+sthlm_x <- DEA_func_logistic(npx_sthlm, clinical_sthlm, "primary_blood_draw") |> 
+  mutate(logFC = Coefficient) 
+
+volcano_logistic(sthlm_x) + ggtitle("Stockholm - primary_blood_draw")
+```
+
+```{r}
+x_BC <- clinical_skane$x_BC
+stratus_densearea_cm2 <- clinical_skane$stratus_densearea_cm2
+  
+model <- glm(x_BC ~ stratus_densearea_cm2, family = "binomial")
+summary_model <- summary(model)
+
+Coefficient <- summary_model$coefficients["stratus_densearea_cm2", "Estimate"]
+PValue <- summary_model$coefficients["stratus_densearea_cm2", "Pr(>|z|)"]
+AdjPValue <- p.adjust(PValue, method = "BH")
+```
+
+# Examining region differences
+```{r}
+protein_skane <- skane_age$protein
+protein_sthlm <- sthlm_age$protein
+
+# Find elements unique to df1
+unique_to_skane <- setdiff(protein_skane, protein_sthlm)
+
+# Find elements unique to df2
+unique_to_sthlm <- setdiff(protein_sthlm, protein_skane)
+```
+
+CES1, IL6 both unique to sthlm, show up as top contenders in BMI
+
+```{r}
+# Need to remove proteins not present in both
+common_proteins <- intersect(skane_age$protein, sthlm_age$protein)
+
+skane_beta_age <- DEA_beta(npx_skane, clinical_skane, "age") |> 
+  filter(protein %in% common_proteins) |> 
+  rename("beta_skane" = label_data) |> 
+  select(protein, beta_skane)
+
+sthlm_beta_age <- DEA_beta(npx_sthlm, clinical_sthlm, "age") |> 
+  filter(protein %in% common_proteins) |>
+  rename("beta_sthlm" = label_data) |> 
+  select(protein, beta_sthlm)
+
+skane_beta_bmi <- DEA_beta(npx_skane, clinical_skane, "bmi") |> 
+  filter(protein %in% common_proteins) |>
+  rename("beta_skane" = label_data) |> 
+  select(protein, beta_skane)
+
+sthlm_beta_bmi <- DEA_beta(npx_sthlm, clinical_sthlm, "bmi") |> 
+  filter(protein %in% common_proteins) |>
+  rename("beta_sthlm" = label_data) |> 
+  select(protein, beta_sthlm)
+
+combined_beta_age <- skane_beta_age |> 
+  left_join(sthlm_beta_age, by = "protein")
+
+combined_beta_bmi <- skane_beta_bmi |> 
+  left_join(sthlm_beta_bmi, by = "protein")
+```
+
+```{r}
+# Same sign or not Skane/Sthlm
+combined_beta_age$sign_group <- ifelse(sign(combined_beta_age$beta_skane) == sign(combined_beta_age$beta_sthlm), 'same_sign', 'diff_sign')
+combined_beta_bmi$sign_group <- ifelse(sign(combined_beta_bmi$beta_skane) == sign(combined_beta_bmi$beta_sthlm), 'same_sign', 'diff_sign')
+
+# In top 10 proteins for DE
+combined_beta_age$label <- ifelse(combined_beta_age$protein %in% skane_age_10$protein | combined_beta_age$protein %in% sthlm_age_10$protein, combined_beta_age$protein, NA)
+combined_beta_bmi$label <- ifelse(combined_beta_bmi$protein %in% skane_bmi_10$protein | combined_beta_bmi$protein %in% sthlm_bmi_10$protein, combined_beta_bmi$protein, NA)
+```
+
+
+```{r}
+cor_age<- cor(combined_beta_age$beta_skane, combined_beta_age$beta_sthlm, use = "complete.obs")
+
+ggplot(combined_beta_age, aes(x = beta_skane, y = beta_sthlm, color = sign_group)) +
+  geom_point(alpha = 0.5) +
+ # geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Skane", y = "Stockholm", title = expression("Comparing slopes ("*beta*") between regions"), subtitle = "Age") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_age, 3)), hjust = 3, vjust = 2) +
+  scale_color_manual(values = c('same_sign' = '#4DBBD5FF', 'diff_sign' = '#E64B35FF'),
+                     labels = c('Different sign (n = 14)', 'Same sign'),
+                     name = "Slope direction") +
+  theme_minimal()
+```
+```{r}
+cor_bmi <- cor(combined_beta_bmi$beta_skane, combined_beta_bmi$beta_sthlm, use = "complete.obs")
+
+ggplot(combined_beta_bmi, aes(x = beta_skane, y = beta_sthlm, color = sign_group)) +
+  geom_point(alpha = 0.5) +
+#  geom_abline(slope = 1, intercept = 0, color = "#265073", linetype = "dashed") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Skane", y = "Stockholm", title = expression("Comparing slopes ("*beta*") between regions"), subtitle = "BMI") +
+  annotate("text", x = Inf, y = Inf, label = paste("Correlation: ", round(cor_bmi, 3)), hjust = 2.3, vjust = 2) +
+  scale_color_manual(values = c('same_sign' = '#4DBBD5FF', 'diff_sign' = '#E64B35FF'),
+                     labels = c('Different sign (n = 24)', 'Same sign'),
+                     name = "Slope direction") +
+  theme_minimal()
+  
+```
+
+```{r}
+common_age_prot <- intersect(skane_age_10$protein, sthlm_age_10$protein) # 9/10 in common
+common_bmi_prot <- intersect(skane_bmi_10$protein, sthlm_bmi_10$protein) # 5/10 in common
+
+combined_common_bmi <- skane_bmi_10$protein |> 
+  bind_cols(sthlm_bmi_10$protein)
+counting_diff_sign_age <- combined_beta_age |> # 14
+  filter(sign_group == "diff_sign")
+
+counting_diff_sign_bmi <- combined_beta_bmi |> # 24
+  filter(sign_group == "diff_sign")
+```
+## Distribution of clinical variables
+```{r}
+bmi_age_skane <- clinical_skane |> 
+  select(sample_id, bmi, age) |> 
+  mutate(Region = "Skane")
+
+bmi_age_sthlm <- clinical_sthlm |> 
+  select(sample_id, bmi, age) |> 
+  mutate(Region = "Stockholm")
+
+combined_bmi_age <- bind_rows(bmi_age_skane, bmi_age_sthlm)
+
+plot_age_density <- ggplot(combined_bmi_age, aes(x = age, fill = Region)) +
+  geom_density(alpha = 0.7) +
+  labs(x = "Age", y = "Density", title = "Comparing age and BMI distributions between regions") +
+  facet_wrap(~ Region) + 
+  theme(legend.position = "none") + 
+  scale_fill_npg() +
+  theme_minimal()
+
+plot_bmi_density <- ggplot(combined_bmi_age, aes(x = bmi, fill = Region)) +
+  geom_density(alpha = 0.7) +
+  labs(x = "BMI", y = "Density") +
+  facet_wrap(~ Region) +
+  theme(legend.position = "none") + 
+  scale_fill_npg() +
+  theme_minimal()
+
+plot_age_density / plot_bmi_density
+```
+## Testing interaction term: Age + BMI in DEA
+```{r}
+DEA_interaction <- function(df, clin_df) {
+  
+  clin_df <- clin_df |> 
+  select(age, bmi, sample_id)
+
+  df <- df |>
+  left_join(clin_df, by = "sample_id")
+  
+  label_data <- df |> 
+    select(age, bmi)
+  
+  design_formula <- as.formula(paste("~", "age * bmi"))
+  design_matrix <- model.matrix(design_formula, data = df)
+  
+  df <- df |> 
+    select(-age, -bmi, -sample_id) |> 
+    t()
+  
+  fit1 <- lmFit(df, design_matrix) # Linear fit
+  fit2 <- eBayes(fit1) # Bayseian opt
+  
+  results <- topTable(fit2, adjust = "BH", number = Inf) |>  # Adjust multiple testing using Benjamini-Hochberg
+    rownames_to_column(var = "protein")
+
+  return(results)
+}
+```
+
+```{r}
+# Skane interaction
+skane_interaction <- DEA_interaction(npx_skane, clinical_skane) |> 
+  rename(logFC = age.bmi)
+volcano(skane_interaction) + ggtitle("age + bmi", subtitle = "Skane")
+
+# Stockholm interaction
+sthlm_interaction <- DEA_interaction(npx_sthlm, clinical_sthlm) |> 
+  rename(logFC = age.bmi) 
+volcano(sthlm_interaction)+ ggtitle("age + bmi", subtitle = "Stockholm")
+```
+```{r}
+# Association between age and bmi variables in both Skåne and Stockholm
+# Skåne
+predictor_skane <- clinical_skane[["age"]]
+outcome_skane <- clinical_skane[["bmi"]]
+
+age_bmi_skane <- glm(outcome_skane ~ predictor_skane)
+summary_age_bmi <- summary(age_bmi_skane)
+
+summary_age_bmi$coefficients
+
+# Stockholm
+predictor_sthlm <- clinical_sthlm[["age"]]
+
+outcome_sthlm <- clinical_sthlm[["bmi"]]
+
+age_bmi_sthlm <- glm(outcome_sthlm ~ predictor_sthlm)
+summary_age_bmi <- summary(age_bmi_sthlm)
+
+summary_age_bmi$coefficients
+```
+
+
+## Levene's test
+
+```{r}
+comb_regions <- bind_rows(clinical_skane, clinical_sthlm)
+
+comb_regions$region <- as_factor(comb_regions$region)
+
+levenes_age <- leveneTest(age ~ region, data = comb_regions, center = mean)
+print(levenes_age)
+
+levenes_bmi <- leveneTest(bmi ~ region, data = comb_regions, center = mean)
+print(levenes_bmi)
+
+```
+
+```{r}
+# dense area
+levenes_dense <- leveneTest(stratus_densearea_cm2 ~ region, data = comb_regions, center = mean)
+print("dense area")
+print(levenes_dense)
+
+
+# menopause
+levenes_meno <- leveneTest(menopause_status ~ region, data = comb_regions, center = mean)
+print("meno")
+print(levenes_meno)
+
+# hormonal
+levenes_mht <- leveneTest(mht_status ~ region, data = comb_regions, center = mean)
+print("hormonal")
+print(levenes_mht)
+
+# alcohol
+levenes_alc <- leveneTest(alcohol_gram_week ~ region, data = comb_regions, center = mean)
+print("alc")
+print(levenes_alc)
+
+# smoking
+levenes_smoke <- leveneTest(smoking_status ~ region, data = comb_regions, center = mean)
+print("smoke")
+print(levenes_smoke)
+```
+
+
+```{r}
+combined_age_binned <- combined_bmi_age |>
+  mutate(age_group = case_when(
+    age < 50 ~ "<50 (n = 383)",               
+    age >= 50 & age <= 65 ~ "50-65 (n = 804)",  
+    TRUE ~ ">65 (n = 469)"                    
+  ))
+
+combined_age_binned$age_group <- as_factor(combined_age_binned$age_group)
+```
+
+```{r}
+levenes_age_bmi <- leveneTest(bmi ~ age_group, combined_age_binned, center = mean)
+print(levenes_age_bmi)
+```
+```{r}
+levenes_skane <- combined_age_binned |> 
+  filter(Region == "Skane")
+
+leveneTest(bmi ~ age_group, levenes_skane, center = mean)
+
+levenes_sthlm <- combined_age_binned |> 
+  filter(Region == "Stockholm")
+
+leveneTest(bmi ~ age_group, levenes_sthlm, center = mean)
+```
+
+
+```{r}
+age_group_count <- combined_age_binned |> 
+  group_by(age_group) |> 
+  summarise(count = n())
+```
+
+
+```{r}
+plot_age_binned_density <- ggplot(combined_age_binned, aes(x = age, fill = Region)) +
+  geom_density(alpha = 0.7) +
+  labs(x = "Age", y = "Density", title = "Age distribution between regions") +
+  facet_wrap(~ Region) + 
+  theme(legend.position = "none") +
+  geom_vline(xintercept = 50, linetype = "dashed", alpha = 0.7) +
+  geom_vline(xintercept = 65, linetype = "dashed", alpha = 0.7) +
+  theme_minimal() +
+  scale_fill_npg()
+
+plot_age_bmi <- ggplot(combined_age_binned, aes(x = age, y = bmi, fill = age_group)) +
+  geom_boxplot(alpha = 0.7, width = 0.1, varwidth = TRUE) +
+ # scale_fill_npg() +
+  labs(fill = "Age group") +
+  theme_minimal()
+
+plot_age_binned_density
+plot_age_bmi + ggtitle("BMI across age groups")
+```
+
+```{r}
+adjuster_interaction <- function(df, clin_df) {
+  
+  # Ensure 'age' and 'bmi' are selected along with 'sample_id'
+  clin_df <- clin_df |> 
+    select(age, bmi, sample_id)
+  
+  # Merge the clinical columns into the protein expression dataframe
+  df <- df |>
+    left_join(clin_df, by = "sample_id")
+  
+  # Store sample ids
+  sample_ids <- df$sample_id
+  
+  # Retrieve column names for protein data, excluding 'age', 'bmi', and 'sample_id'
+  col_names <- setdiff(colnames(df), c("age", "bmi", "sample_id"))
+   
+  # Initialize a tibble to store adjusted protein levels
+  adjusted_npx <- tibble(matrix(ncol = length(col_names), nrow = nrow(df)))
+  names(adjusted_npx) <- col_names  # Set correct column names
+  
+  # Loop through each protein column to calculate adjusted values
+  for (protein in col_names) {
+    
+    # Fitting a linear model with interaction between age and bmi
+    linear_model <- lm(reformulate(termlabels = c("age", "bmi", "age:bmi"), response = protein), data = df)
+    
+    # Storing the residuals, which represent protein levels adjusted for age, bmi, and their interaction
+    adjusted_npx[[protein]] <- linear_model$residuals
+  }
+
+  # Combine the sample_id back with the adjusted protein data
+  adjusted_npx <- bind_cols(tibble(sample_id = sample_ids), adjusted_npx)
+  
+  # Return the adjusted protein expression data
+  return(adjusted_npx)
+}
+```
+
+```{r}
+# Removing effect of interaction term of age:bmi
+adjusted_skane <- adjuster_interaction(npx_skane, clinical_skane)
+adjusted_sthlm <- adjuster_interaction(npx_sthlm, clinical_sthlm)
+```
+
+```{r}
+data <- data.frame(
+  Formula = c("age ~ region", "bmi ~ region", "breast dense area ~ region","alcohol g/week ~ region", "hormonal_treatment ~ region", "bmi ~ age_group", "bmi ~ age_group", "bmi ~ age_group"),
+  P_Value = c(0.9123, 0.5928, 0.01269, 3.275e-05, 0.01975, 0.001022, 0.001327, 0.1382),
+  Region = c("Skåne + Stockholm", "Skåne + Stockholm", "Skåne + Stockholm", "Skåne + Stockholm", "Skåne + Stockholm", "Skåne + Stockholm", "Skåne", "Stockholm")
+)
+
+# Function to render the table using gt
+render_table <- function(data) {
+  # Render the table with gt
+  data %>%
+    gt() %>%
+    cols_width(
+      Formula ~ px(300),  # Specify width in pixels using formula
+      P_Value ~ px(100)
+    ) %>%
+    cols_label(
+      Formula = "Formula",
+      P_Value = "P-Value"
+    ) %>%
+    fmt_number(
+      columns = c(P_Value),
+      decimals = 5
+    ) %>%
+    tab_header(
+      title = "Levene's Test Results"
+    ) %>%
+    tab_style(
+      style = cell_text(weight = "bold"),  # Apply bold style to column labels
+      locations = cells_column_labels(columns = everything())
+    ) %>%
+    tab_style(
+      style = cell_text(style = "italic"),  # Make text bold, italic, and red
+      locations = cells_body(
+        columns = P_Value,
+        rows = P_Value < 0.05  # Apply this style to rows where P_Value is less than 0.05
+      )
+    )
+}
+
+# Create and display the table
+render_table(data)
+```
+
+
+## Output
+```{r}
+# Output from adjusting for variables
+write_csv(adjusted_skane, "../clean_data/npx_skane_adj.csv")
+write_csv(adjusted_sthlm, "../clean_data/npx_sthlm_adj.csv")
+```
+
+
+```{r}
+
+```
+

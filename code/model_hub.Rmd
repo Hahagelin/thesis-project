@@ -1,0 +1,464 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(xgboost)
+library(randomForest)
+library(vip)
+library(pROC)
+library(glmnet)
+library(nnet)
+```
+
+## Reading in data
+
+```{r}
+source("model_framework.R")
+
+# Reading clinical data
+clinical_skane <- read_csv("../clean_data/clinical_skane_filtered.csv", show_col_types = FALSE)
+clinical_sthlm <- read_csv("../clean_data/clinical_sthlm_filtered.csv", show_col_types = FALSE)
+
+# Loading in multiple versions of the NPX (e.g. NPX, ratios, etc.)
+npx_skane <- read_csv("../clean_data/norm_npx_skane_v2.csv", show_col_types = FALSE)
+npx_sthlm <- read_csv("../clean_data/norm_npx_sthlm_v2.csv", show_col_types = FALSE)
+
+adj_skane <- read_csv("../clean_data/npx_skane_adj.csv", show_col_types = FALSE)
+adj_sthlm <- read_csv("../clean_data/npx_sthlm_adj.csv", show_col_types = FALSE)
+
+string_skane <- read_csv("../ratios/string_ratio_skane.csv", show_col_types = FALSE)
+string_sthlm <- read_csv("../ratios/string_ratio_sthlm.csv", show_col_types = FALSE)
+
+string_skane_un <- read_csv("../ratios/string_ratio_skane_un.csv", show_col_types = FALSE)
+string_sthlm_un <- read_csv("../ratios/string_ratio_sthlm_un.csv", show_col_types = FALSE)
+```
+
+```{r}
+# Specifies which clinical variables to include in the model (minimum: target variable)
+list = c("x_BC")
+
+# Normalized NPX
+skane_npx <- prepper(npx_skane, clinical_skane, list)
+sthlm_npx <- prepper(npx_sthlm, clinical_sthlm, list)
+
+# NPX adjusted for age, bmi, and age:bmi
+skane_adj <- prepper(adj_skane, clinical_skane, list)
+sthlm_adj <- prepper(adj_sthlm, clinical_sthlm, list)
+
+# NPX ratios (log a - log b), on the proteins found to be interacting on STRING
+skane_string <- prepper(string_skane, clinical_skane, list)
+sthlm_string <- prepper(string_sthlm, clinical_sthlm, list)
+```
+
+## Running models
+
+```{r}
+start_time <- Sys.time()
+# Calling classifier functions:
+
+# XGBoost
+adj_xgboost <- classifier(skane_adj, sthlm_adj, "x_BC", "xgboost")
+string_xgboost <- classifier(skane_string, sthlm_string, "x_BC", "xgboost")
+
+# LightGBM
+adj_light <- classifier(skane_adj, sthlm_adj, "x_BC", "lightgbm")
+string_light <- classifier(skane_string, sthlm_string, "x_BC", "lightgbm")
+
+# Random forest
+adj_rf <- classifier(skane_adj, sthlm_adj, "x_BC", "randomForest")
+string_rf <- classifier(skane_string, sthlm_string, "x_BC", "randomForest")
+
+# "Lasso"
+adj_log <- classifier(skane_adj, sthlm_adj, "x_BC", "glmnet")
+string_log <- classifier(skane_string, sthlm_string, "x_BC", "glmnet")
+
+end_time <- Sys.time()
+```
+
+```{r}
+duration <- end_time - start_time
+print(duration)
+```
+
+# Examining results
+
+```{r}
+
+# Examining performance metrics from the training and test sets
+
+# XGBoost
+adj_xgboost$Performance
+string_xgboost$Performance
+
+# LightGBM
+adj_light$Performance$Skane_Final_Test
+string_light$Performance
+
+# Random forest
+adj_rf$Performance
+string_rf$Performance
+
+# "Lasso"
+adj_log$Performance
+string_log$Performance
+```
+
+```{r}
+# Plotting the feature importance of the final fit
+
+# Adjusted NPX
+vip(adj_xgboost$Skane$VIP_Model)
+vip(adj_light$Skane$VIP_Model)
+vip(adj_rf$Skane$VIP_Model)
+vip(adj_log$Skane$VIP_Model)
+```
+
+```{r}
+# Ratios based on STRING
+vip(string_xgboost$Skane$VIP_Model)
+vip(string_light$Skane$VIP_Model)
+vip(string_rf$Skane$VIP_Model)
+vip(string_log$Skane$VIP_Model)
+```
+
+# Column plots
+
+Here, the column plots for the thesis are created (in a very lazy way).
+
+```{r}
+## No ratios!
+
+# Adjusted values, XGBoost
+a <- adj_xgboost$Skane$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "adj_xgboost") |> 
+  mutate(region = "Skåne")
+b <- adj_xgboost$Stockholm$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "adj_xgboost") |> 
+  mutate(region = "Stockholm")
+
+# LightGBM
+c <- adj_light$Skane$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "adj_light") |> 
+  mutate(region = "Skåne")
+d <- adj_light$Stockholm$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "adj_light") |> 
+  mutate(region = "Stockholm")
+
+# Random forest
+e <- adj_rf$Skane$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "adj_rf") |> 
+  mutate(region = "Skåne")
+f <- adj_rf$Stockholm$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "adj_rf") |> 
+  mutate(region = "Stockholm")
+
+# Glmnet
+g <- adj_log$Skane$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "adj_log") |> 
+  mutate(region = "Skåne")
+h <- adj_log$Stockholm$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "adj_log") |> 
+  mutate(region = "Stockholm")
+
+adj_tuned <- bind_rows(a, b, c, d, e, f, g, h) |> 
+  mutate(data = "adj")
+```
+
+```{r}
+## Ratios!
+
+# XGBoost
+a <- string_xgboost$Skane$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "string_xgboost") |> 
+  mutate(region = "Skåne")
+b <- string_xgboost$Stockholm$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "string_xgboost") |> 
+  mutate(region = "Stockholm")
+
+# LightGBM
+c <- string_light$Skane$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "string_light") |> 
+  mutate(region = "Skåne")
+d <- string_light$Stockholm$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "string_light") |> 
+  mutate(region = "Stockholm")
+
+# Random forest
+e <- string_rf$Skane$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "string_rf") |> 
+  mutate(region = "Skåne")
+f <- string_rf$Stockholm$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "string_rf") |> 
+  mutate(region = "Stockholm")
+
+# Glmnet
+g <- string_log$Skane$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "string_log") |> 
+  mutate(region = "Skåne")
+h <- string_log$Stockholm$Best_Params |>
+  select(mean) |> 
+  arrange(desc(mean)) |>
+  slice_head() |> 
+  mutate(type = "string_log") |> 
+  mutate(region = "Stockholm")
+
+string_tuned <- bind_rows(a, b, c, d, e, f, g, h) |> 
+  mutate(data = "string")
+```
+
+```{r}
+adj_tuned$mean <- as.numeric(adj_tuned$mean)
+string_tuned$mean <- as.numeric(string_tuned$mean)
+library(ggsci)
+```
+
+```{r}
+# Creating nicer labels
+string_labels <- c("XGBoost", "XGBoost", "LightGBM", "LightGBM", "Random Forest", "Random Forest", "Glmnet", "Glmnet")
+adj_labels <- c("XGBoost", "XGBoost", "LightGBM", "LightGBM", "Random Forest", "Random Forest", "Glmnet", "Glmnet")
+
+string_tuned <- string_tuned |> 
+  bind_cols(string_labels)|> 
+  rename(Model = ...5) |> 
+  rename(Region = region)
+
+adj_tuned <- adj_tuned |> 
+  bind_cols(adj_labels)|> 
+  rename(Model = ...5) |> 
+  rename(Region = region)
+
+tuned_results <- adj_tuned |> 
+  bind_rows(string_tuned)
+```
+
+```{r}
+dodge_width = 0.6
+tuned_bar_string <- ggplot(string_tuned, aes(x = Model, y = mean, fill = Region)) +
+  geom_col(position = position_dodge(width = dodge_width), alpha = 0.7) +
+  theme_minimal() +
+  scale_fill_npg() +
+  ylim(0, 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", alpha = 0.4) +
+  ggtitle("STRING interaction ratios", subtitle = "Tuned") +
+  ylab("AUC (mean)") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+tuned_bar_adj <- ggplot(adj_tuned, aes(x = Model, y = mean, fill = Region)) +
+  geom_col(position = position_dodge(width = dodge_width), alpha = 0.7) +
+  theme_minimal() +
+  scale_fill_npg() +
+  ylim(0, 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", alpha = 0.4) +
+  ggtitle("Adjusted NPX values", subtitle = "Tuned") +
+  ylab("AUC (mean)") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), legend.position = "none")
+
+tuned_bar_adj + tuned_bar_string
+```
+
+```{r}
+## Untuned values
+
+# Adjusted values, XGBoost
+untuned_adj_skane <- adj_xgboost$Performance$Skane_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "XGBoost") |> 
+  mutate(Region = "Skåne")
+
+untuned_adj_sthlm <- adj_xgboost$Performance$Stockholm_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "XGBoost") |> 
+  mutate(Region = "Stockholm")
+
+# LightGBM
+untuned_adj_skane_lgm <- adj_light$Performance$Skane_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "LightGBM") |> 
+  mutate(Region = "Skåne")
+
+untuned_adj_sthlm_lgm <- adj_light$Performance$Stockholm_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "LightGBM") |> 
+  mutate(Region = "Stockholm")
+
+# Random Forest
+untuned_adj_skane_rf <- adj_rf$Performance$Skane_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "Random Forest") |> 
+  mutate(Region = "Skåne")
+
+untuned_adj_sthlm_rf <- adj_rf$Performance$Stockholm_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "Random Forest") |> 
+  mutate(Region = "Stockholm")
+
+# Glmnet
+untuned_adj_skane_log <- adj_log$Performance$Skane_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "Glmnet") |> 
+  mutate(Region = "Skåne")
+
+untuned_adj_sthlm_log <- adj_log$Performance$Stockholm_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "Glmnet") |> 
+  mutate(Region = "Stockholm")
+
+
+
+untuned_adj <- bind_rows(untuned_adj_skane, untuned_adj_sthlm, untuned_adj_skane_lgm, untuned_adj_sthlm_lgm, untuned_adj_skane_rf, untuned_adj_sthlm_rf, untuned_adj_skane_log, untuned_adj_sthlm_log)
+```
+
+```{r}
+## Ratios!
+
+## Untuned values
+
+# Adjusted values, XGBoost
+untuned_string_skane <- string_xgboost$Performance$Skane_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "XGBoost") |> 
+  mutate(Region = "Skåne")
+
+untuned_string_sthlm <- string_xgboost$Performance$Stockholm_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "XGBoost") |> 
+  mutate(Region = "Stockholm")
+
+# LightGBM
+untuned_string_skane_lgm <- string_light$Performance$Skane_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "LightGBM") |> 
+  mutate(Region = "Skåne")
+
+untuned_string_sthlm_lgm <- string_light$Performance$Stockholm_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "LightGBM") |> 
+  mutate(Region = "Stockholm")
+
+# Random Forest
+untuned_string_skane_rf <- string_rf$Performance$Skane_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "Random Forest") |> 
+  mutate(Region = "Skåne")
+
+untuned_string_sthlm_rf <- string_rf$Performance$Stockholm_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "Random Forest") |> 
+  mutate(Region = "Stockholm")
+
+# Glmnet
+untuned_string_skane_log <- string_log$Performance$Skane_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "Glmnet") |> 
+  mutate(Region = "Skåne")
+
+untuned_string_sthlm_log <- string_log$Performance$Stockholm_Final_Test |>
+  filter(.metric == "roc_auc") |> 
+  select(.estimate) |> 
+  mutate(Model = "Glmnet") |> 
+  mutate(Region = "Stockholm")
+
+
+
+untuned_string <- bind_rows(untuned_string_skane, untuned_string_sthlm, untuned_string_skane_lgm, untuned_string_sthlm_lgm, untuned_string_skane_rf, untuned_string_sthlm_rf, untuned_string_skane_log, untuned_string_sthlm_log)
+```
+
+```{r}
+dodge_width = 0.6
+untuned_bar_string <- ggplot(untuned_string, aes(x = Model, y = .estimate, fill = Region)) +
+  geom_col(position = position_dodge(width = dodge_width), alpha = 0.7) +
+  theme_minimal() +
+  scale_fill_npg() +
+  ylim(0, 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", alpha = 0.4) +
+  ggtitle("STRING interaction ratios", subtitle = "Untuned") +
+  ylab("AUC (mean)") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+untuned_bar_adj <- ggplot(untuned_adj, aes(x = Model, y = .estimate, fill = Region)) +
+  geom_col(position = position_dodge(width = dodge_width), alpha = 0.7) +
+  theme_minimal() +
+  scale_fill_npg() +
+  ylim(0, 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", alpha = 0.4) +
+  ggtitle("Adjusted NPX values", subtitle = "Untuned") +
+  ylab("AUC (mean)") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), legend.position = "none")
+
+untuned_bar_adj + untuned_bar_string
+```
+
+```{r}
+# Unadjusted NPX used for predicting age
+skane_string_un <- prepper(string_skane_un, clinical_skane, c("age"))
+sthlm_string_un <- prepper(string_sthlm_un, clinical_sthlm, c("age"))
+
+# Predicting age using plasma protein levels
+age_xgboost <- regressor(skane_string_un, sthlm_string_un, "age", "xgboost")
+age_light <- regressor(skane_string_un, sthlm_string_un, "age", "lightgbm")
+
+age_xgboost$Performance
+vip(age_xgboost$Skane$VIP_Model)
+
+age_light$Performance
+vip(age_light$Skane$VIP_Model)
+```

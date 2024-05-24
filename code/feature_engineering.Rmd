@@ -1,0 +1,172 @@
+
+# Feature Engineering
+```{r}
+library(tidyverse)
+library(viridis)
+library(FactoMineR)
+library(factoextra)
+library(pheatmap)
+library(umap)
+library(patchwork)
+library(limma)
+library(ggsci)
+```
+
+```{r}
+# Loading NPX- and clinical data
+npx_skane <- read_csv("../clean_data/npx_skane_adj.csv", show_col_types = FALSE) # Adjusted for clinical variables
+clinical_skane <- read_csv("../clean_data/clinical_skane_filtered.csv", show_col_types = FALSE)
+
+npx_sthlm <- read_csv("../clean_data/npx_sthlm_adj.csv", show_col_types = FALSE)
+clinical_sthlm <- read_csv("../clean_data/clinical_sthlm_filtered.csv", show_col_types = FALSE)
+
+norm_skane <- read_csv("../clean_data/norm_npx_skane_v2.csv", show_col_types = FALSE)
+norm_sthlm <- read_csv("../clean_data/norm_npx_sthlm_v2.csv", show_col_types = FALSE)
+```
+
+## Ratios
+```{r}
+# Old ratio function
+protein_corr <- function(df, df_name) {
+ 
+  # Creates correlation matrix
+  corr_df <- df |>
+    cor(method = "spearman", use = "complete.obs") 
+  
+  # Removes diagonal
+  diag(corr_df) <- NA
+
+  long_corr_df <- corr_df |> 
+    as_tibble(corr_df, rownames = "Protein1") |> 
+    pivot_longer(-Protein1, names_to = "Protein2", values_to = "Correlation") |> 
+    mutate(Matrix = df_name) |> 
+    # Removing duplicates and the diagonal
+    filter(Protein1 != Protein2) |> 
+    mutate(pair_id = pmap_chr(list(Protein1, Protein2), ~paste(sort(c(...)), collapse = "_"))) |> 
+    distinct(pair_id, .keep_all = TRUE) |> 
+    select(-pair_id)
+  
+  return(long_corr_df)
+} 
+
+ratio_func <- function(corr_df, npx_df, selected_proteins = NULL) {
+  
+  if (is.null(selected_proteins)) {
+    filtered_corr_df <- corr_df
+  } else {
+    filtered_corr_df <- corr_df |> 
+      filter(sample_id, Protein1 %in% selected_proteins & Protein2 %in% selected_proteins)
+  }
+  
+  ratios <- npx_df
+  
+  # Use the filtered_corr_df for iterating through the protein pairs
+  for(i in 1:nrow(filtered_corr_df)) {
+   
+     # Skip calculation if 'sample_id' is one of the proteins
+     if(filtered_corr_df$Protein1[i] == 'sample_id' | filtered_corr_df$Protein2[i] == 'sample_id') {
+       next
+     }
+    
+     x <- npx_df[[filtered_corr_df$Protein1[i]]]
+     y <- npx_df[[filtered_corr_df$Protein2[i]]]
+     
+     z <- x - y
+     
+    column_name <- paste(filtered_corr_df$Protein1[i], filtered_corr_df$Protein2[i], "ratio", sep = "_")
+    ratios <- add_column(ratios, !!sym(column_name) := z)
+  }
+     
+  return(ratios)
+}
+```
+
+```{r}
+corr_skane <- protein_corr(npx_skane |> select(-sample_id), "corr_skane")
+
+
+corr_sthlm <- protein_corr(npx_sthlm |> select(-sample_id), "corr_sthlm")
+
+```
+
+```{r}
+# Interactions from STRING
+interactions <- read_csv("string_interactions_modified.csv") |> 
+  separate(col = `Protein1;Protein2`, into = c("Protein1", "Protein2"), sep = ";")
+
+
+total_proteins <- read_csv("proteins.csv") |> 
+  filter(!(value == "sample_id"))
+
+# Removing proteins not present in the protein (some extra proteins/different names used appeared during the STRING search)
+filtered_int <- interactions |> 
+  filter(Protein1 %in% total_proteins$value) |> 
+  filter(Protein2 %in% total_proteins$value)
+```
+
+```{r}
+corr_skane <- protein_corr(npx_skane, "corr_skane")
+#ratios_skane <- ratio_func(corr_skane, npx_skane)
+#ratios_only_skane <- ratios_skane |> 
+#  select(sample_id, ends_with("ratio"))
+
+corr_sthlm <- protein_corr(npx_sthlm, "corr_sthlm")
+#ratios_sthlm <- ratio_func(corr_sthlm, npx_sthlm)
+#ratios_only_sthlm <- ratios_sthlm |> 
+#  select(sample_id, ends_with("ratio"))
+```
+
+```{r}
+a <- c(filtered_int$Protein1, filtered_int$Protein2)
+
+# Creating ratios using the pathway data 
+ratio_string_skane <- ratio_func(filtered_int, npx_skane) |> 
+  select(-all_of(a))
+ratio_string_sthlm <- ratio_func(filtered_int, npx_sthlm) |> 
+  select(-all_of(a))
+
+write_csv(ratio_string_skane, "../ratios/string_ratio_skane.csv")
+write_csv(ratio_string_sthlm, "../ratios/string_ratio_sthlm.csv")
+```
+
+```{r}
+# Ratios again but with unadjusted data
+un_string_skane <- ratio_func(filtered_int, norm_skane) |> 
+  select(-all_of(a))
+un_string_sthlm <- ratio_func(filtered_int, norm_sthlm) |> 
+  select(-all_of(a))
+
+
+
+write_csv(un_string_skane, "../ratios/string_ratio_skane_un.csv")
+write_csv(un_string_sthlm, "../ratios/string_ratio_sthlm_un.csv")
+```
+
+# Evaluating ratio distribution (same as with the raw/adjusted NPX data)
+```{r}
+ratios_long_skane <- ratios_only_skane |> 
+  pivot_longer(-sample_id, names_to = "Protein", values_to = "NPX")
+ratios_long_sthlm <- ratios_only_sthlm |> 
+  pivot_longer(-sample_id, names_to = "Protein", values_to = "NPX")
+
+dens_skane <- ggplot(ratios_long_skane, aes(x = NPX)) +
+  geom_density()
+dens_sthlm <- ggplot(ratios_long_sthlm, aes(x = NPX)) +
+  geom_density()
+
+dens_skane + dens_sthlm
+```
+
+```{r}
+long_skane <- npx_skane |> 
+  pivot_longer(-sample_id, names_to = "Protein", values_to = "NPX")
+long_sthlm <- npx_sthlm |> 
+  pivot_longer(-sample_id, names_to = "Protein", values_to = "NPX")
+
+plot_skane <- ggplot(long_skane, aes(x = NPX)) +
+  geom_density()
+plot_sthlm <- ggplot(long_sthlm, aes(x = NPX)) +
+  geom_density()
+
+plot_skane + plot_sthlm
+```
